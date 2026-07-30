@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           base64 -d budgetfork-runtime/harness.py.gz.b64 | gzip -d > budgetfork-runtime/harness.py
-          echo '46affe036422bcdd106104aa9d4b3b0340c1b47ec4067ba5c70142676d6b382d  budgetfork-runtime/harness.py' | sha256sum -c -
+          echo 'af09678fa8ab8c703cf2556dbf9705d7d334c7aaa6e54e88d9852b387c2ffd25  budgetfork-runtime/harness.py' | sha256sum -c -
           python -m py_compile budgetfork-runtime/harness.py
 
       - name: Fetch pinned public repositories
@@ -49,7 +49,7 @@ jobs:
           test "$(git -C repos/ai-hedge-fund rev-parse HEAD)" = '9557e64273e212635a4a28cbd8128df22f166c07'
 
       - name: Install minimal dependencies
-        run: python -m pip install --disable-pip-version-check -q requests python-dotenv 'pydantic>=2,<3'
+        run: python -m pip install --disable-pip-version-check -q requests python-dotenv 'pydantic>=2,<3' numpy pandas
 
       - name: Run repository-runtime experiment
         shell: bash
@@ -114,6 +114,7 @@ jobs:
           sha256sum budgetfork-runtime/harness.py budgetfork-runtime/results/* budgetfork-runtime/evidence/* > budgetfork-runtime/results/MANIFEST.sha256
 
       - name: Upload reproducibility artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: budgetfork-runtime-results
@@ -121,5 +122,5 @@ jobs:
             budgetfork-runtime/harness.py
             budgetfork-runtime/results/**
             budgetfork-runtime/evidence/**
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
