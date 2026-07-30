@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d budgetfork-runtime/harness.py.gz.b64 | gzip -d > budgetfork-runtime/harness.py
+          cat budgetfork-runtime/harness.part.* | base64 -d | gzip -d > budgetfork-runtime/harness.py
           echo 'af09678fa8ab8c703cf2556dbf9705d7d334c7aaa6e54e88d9852b387c2ffd25  budgetfork-runtime/harness.py' | sha256sum -c -
           python -m py_compile budgetfork-runtime/harness.py
 
