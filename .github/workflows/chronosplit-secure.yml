@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/chronosplit-secure.yml'
       - 'handshake/**'
+      - 'runner/**'
 
 permissions:
   contents: write
@@ -23,7 +24,7 @@ jobs:
           fetch-depth: 0
           token: ${{ github.token }}
 
-      - name: Generate ephemeral RSA key and run encrypted payload
+      - name: Generate ephemeral RSA key and run checked-in encrypted-key payload
         id: secure
         shell: bash
         env:
@@ -49,41 +50,36 @@ jobs:
           found=0
           for _ in $(seq 1 120); do
             git fetch -q origin "$BRANCH"
-            if git show "origin/${BRANCH}:handshake/payload.enc" > "$RUNNER_TEMP/payload.enc" 2>/dev/null && \
-               git show "origin/${BRANCH}:handshake/key.enc" > "$RUNNER_TEMP/key.enc" 2>/dev/null; then
+            if git show "origin/${BRANCH}:handshake/key.enc.b64" > "$RUNNER_TEMP/key.enc.b64" 2>/dev/null; then
               found=1
               break
             fi
             sleep 10
           done
           if [[ "$found" != 1 ]]; then
-            echo 'Encrypted payload was not supplied before timeout.' >&2
+            echo 'Encrypted API key was not supplied before timeout.' >&2
             exit 2
           fi
 
+          base64 -d "$RUNNER_TEMP/key.enc.b64" > "$RUNNER_TEMP/key.enc"
           openssl pkeyutl -decrypt \
             -inkey "$RUNNER_TEMP/private.pem" \
             -pkeyopt rsa_padding_mode:oaep \
             -pkeyopt rsa_oaep_md:sha256 \
             -in "$RUNNER_TEMP/key.enc" \
-            -out "$RUNNER_TEMP/aes.key"
-          openssl enc -d -aes-256-cbc -pbkdf2 \
-            -in "$RUNNER_TEMP/payload.enc" \
-            -out "$RUNNER_TEMP/payload.tar.gz" \
-            -pass file:"$RUNNER_TEMP/aes.key"
+            -out "$RUNNER_TEMP/openai.key"
 
           mkdir -p "$GITHUB_WORKSPACE/work"
-          tar -xzf "$RUNNER_TEMP/payload.tar.gz" -C "$GITHUB_WORKSPACE/work"
+          base64 -d runner/code.tar.gz.b64 | tar -xzf - -C "$GITHUB_WORKSPACE/work"
           cd "$GITHUB_WORKSPACE/work/chronosplit_gonogo"
-          export OPENAI_API_KEY="$(cat ../openai_key.txt)"
-          rm -f ../openai_key.txt
+          export OPENAI_API_KEY="$(cat "$RUNNER_TEMP/openai.key")"
           python -m pip install --disable-pip-version-check -q -r requirements.txt
           python tests/test_semantics.py
           mkdir -p results
           set -o pipefail
           N_EVENTS=24 MODEL='gpt-5.4-mini-2026-03-17' MAX_COST_USD=8 ./run.sh 2>&1 | tee results/runner.log
           unset OPENAI_API_KEY
-          rm -f "$RUNNER_TEMP/private.pem" "$RUNNER_TEMP/aes.key" "$RUNNER_TEMP/payload.tar.gz"
+          rm -f "$RUNNER_TEMP/private.pem" "$RUNNER_TEMP/key.enc" "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/openai.key"
 
       - name: Upload reproducibility artifact
         if: always()
