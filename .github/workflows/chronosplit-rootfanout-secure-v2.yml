@@ -1,0 +1,99 @@
+name: ChronoSplit Root-Fanout Secure GO-NO-GO Run v2
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/chronosplit-rootfanout-secure-v2.yml'
+      - 'handshake-rootfanout-v2/**'
+
+permissions:
+  contents: write
+
+jobs:
+  secure-run:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out temporary branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Generate ephemeral RSA key and run encrypted-key experiment
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p handshake-rootfanout-v2
+          if [[ -f handshake-rootfanout-v2/public.pem ]]; then
+            echo 'A prior v2 job owns the ephemeral private key; this follow-up run exits normally.'
+            exit 0
+          fi
+
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$RUNNER_TEMP/private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/private.pem" -pubout -out handshake-rootfanout-v2/public.pem >/dev/null 2>&1
+
+          git config user.name 'chronosplit-rootfanout-v2-runner'
+          git config user.email 'chronosplit-rootfanout-v2-runner@users.noreply.github.com'
+          git add handshake-rootfanout-v2/public.pem
+          git commit -m 'Root-Fanout v2: publish ephemeral encryption key'
+          git push origin "HEAD:${BRANCH}"
+
+          found=0
+          for _ in $(seq 1 150); do
+            git fetch -q origin "$BRANCH"
+            if git show "origin/${BRANCH}:handshake-rootfanout-v2/source.tar.gz.b64" > "$RUNNER_TEMP/source.tar.gz.b64" 2>/dev/null && \
+               git show "origin/${BRANCH}:handshake-rootfanout-v2/openai_key.enc.b64" > "$RUNNER_TEMP/openai_key.enc.b64" 2>/dev/null; then
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$found" != 1 ]]; then
+            echo 'Source or encrypted key was not supplied before timeout.' >&2
+            exit 2
+          fi
+
+          base64 -d "$RUNNER_TEMP/source.tar.gz.b64" > "$RUNNER_TEMP/source.tar.gz"
+          base64 -d "$RUNNER_TEMP/openai_key.enc.b64" > "$RUNNER_TEMP/openai_key.enc"
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/private.pem" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -in "$RUNNER_TEMP/openai_key.enc" \
+            -out "$RUNNER_TEMP/openai_key.txt"
+
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C "$GITHUB_WORKSPACE/work"
+          mv "$GITHUB_WORKSPACE/work/chronosplit_rootfanout_run" "$GITHUB_WORKSPACE/work/chronosplit_rootfanout"
+          cd "$GITHUB_WORKSPACE/work/chronosplit_rootfanout"
+          export OPENAI_API_KEY="$(cat "$RUNNER_TEMP/openai_key.txt")"
+          shred -u "$RUNNER_TEMP/openai_key.txt" || rm -f "$RUNNER_TEMP/openai_key.txt"
+          python -m pip install --disable-pip-version-check -q -r requirements.txt
+          python tests/test_semantics.py
+          mkdir -p results
+          set -o pipefail
+          N_EVENTS=24 REPEATS=3 MODEL='gpt-5.4-mini-2026-03-17' MAX_COST_USD=8 ./run.sh 2>&1 | tee results/runner.log
+          unset OPENAI_API_KEY
+          rm -f "$RUNNER_TEMP/private.pem" "$RUNNER_TEMP/openai_key.enc" "$RUNNER_TEMP/source.tar.gz"
+
+      - name: Upload reproducibility artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronosplit-rootfanout-v2-results
+          path: |
+            work/chronosplit_rootfanout/results/**
+            work/chronosplit_rootfanout/src/**
+            work/chronosplit_rootfanout/tests/**
+            work/chronosplit_rootfanout/data/selected_events.csv
+            work/chronosplit_rootfanout/README.md
+            work/chronosplit_rootfanout/requirements.txt
+          if-no-files-found: warn
+          retention-days: 7
