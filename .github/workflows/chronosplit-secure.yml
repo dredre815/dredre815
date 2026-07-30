@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           token: ${{ github.token }}
 
-      - name: Generate ephemeral RSA key and run checked-in encrypted-key payload
+      - name: Generate ephemeral RSA key and run encrypted-key experiment
         id: secure
         shell: bash
         env:
@@ -70,11 +70,12 @@ jobs:
             -out "$RUNNER_TEMP/openai.key"
 
           mkdir -p "$GITHUB_WORKSPACE/work"
-          base64 -d runner/code.tar.gz.b64 | tar -xzf - -C "$GITHUB_WORKSPACE/work"
+          cp -a runner/chronosplit_gonogo "$GITHUB_WORKSPACE/work/chronosplit_gonogo"
           cd "$GITHUB_WORKSPACE/work/chronosplit_gonogo"
           export OPENAI_API_KEY="$(cat "$RUNNER_TEMP/openai.key")"
           python -m pip install --disable-pip-version-check -q -r requirements.txt
           python tests/test_semantics.py
+          chmod +x run.sh
           mkdir -p results
           set -o pipefail
           N_EVENTS=24 MODEL='gpt-5.4-mini-2026-03-17' MAX_COST_USD=8 ./run.sh 2>&1 | tee results/runner.log
