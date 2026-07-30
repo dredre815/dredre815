@@ -1,0 +1,55 @@
+name: BudgetFork Runtime Validation Rerun
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/budgetfork-runtime-rerun.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rerun:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Decode harness
+        run: |
+          cat budgetfork-runtime/harness.part.* | base64 -d | gzip -d > budgetfork-runtime/harness.py
+          echo 'af09678fa8ab8c703cf2556dbf9705d7d334c7aaa6e54e88d9852b387c2ffd25  budgetfork-runtime/harness.py' | sha256sum -c -
+      - name: Fetch pinned repositories
+        run: |
+          mkdir -p repos
+          git clone -q https://github.com/zhound420/swarm-trader.git repos/swarm-trader
+          git -C repos/swarm-trader checkout -q 3470b8291c438dc36b22ed37b7e56ba2bbf249b5
+          git clone -q https://github.com/virattt/ai-hedge-fund.git repos/ai-hedge-fund
+          git -C repos/ai-hedge-fund checkout -q 9557e64273e212635a4a28cbd8128df22f166c07
+      - name: Run experiment
+        run: |
+          python -m pip install --disable-pip-version-check -q requests python-dotenv 'pydantic>=2,<3' numpy pandas pyyaml
+          mkdir -p budgetfork-runtime/results budgetfork-runtime/evidence
+          python budgetfork-runtime/harness.py --swarm-repo repos/swarm-trader --aihf-repo repos/ai-hedge-fund --out budgetfork-runtime/results --n-each 2000 | tee budgetfork-runtime/results/stdout.json
+          cp repos/swarm-trader/risk_manager.py budgetfork-runtime/evidence/swarm_risk_manager.py
+          cp repos/swarm-trader/src/alpaca_integration.py budgetfork-runtime/evidence/swarm_alpaca_integration.py
+          cp repos/ai-hedge-fund/v2/risk/limits.py budgetfork-runtime/evidence/aihf_v2_limits.py
+          cp repos/ai-hedge-fund/v2/pipeline/execution.py budgetfork-runtime/evidence/aihf_v2_execution.py
+          cp repos/ai-hedge-fund/v2/pipeline/run_cycle.py budgetfork-runtime/evidence/aihf_v2_run_cycle.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: budgetfork-runtime-rerun-results
+          path: |
+            budgetfork-runtime/harness.py
+            budgetfork-runtime/results/**
+            budgetfork-runtime/evidence/**
+          if-no-files-found: warn
+          retention-days: 7
