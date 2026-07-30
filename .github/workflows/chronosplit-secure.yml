@@ -1,0 +1,100 @@
+name: ChronoSplit Secure GO-NO-GO Run
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/chronosplit-secure.yml'
+      - 'handshake/**'
+
+permissions:
+  contents: write
+
+jobs:
+  secure-run:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out temporary branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Generate ephemeral RSA key and run encrypted payload
+        id: secure
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p handshake
+          if [[ -f handshake/public.pem ]]; then
+            echo 'A prior job owns the ephemeral private key; this follow-up run exits normally.'
+            exit 0
+          fi
+
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$RUNNER_TEMP/private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/private.pem" -pubout -out handshake/public.pem >/dev/null 2>&1
+
+          git config user.name 'chronosplit-runner'
+          git config user.email 'chronosplit-runner@users.noreply.github.com'
+          git add handshake/public.pem
+          git commit -m 'ChronoSplit: publish ephemeral encryption key'
+          git push origin "HEAD:${BRANCH}"
+
+          found=0
+          for _ in $(seq 1 120); do
+            git fetch -q origin "$BRANCH"
+            if git show "origin/${BRANCH}:handshake/payload.enc" > "$RUNNER_TEMP/payload.enc" 2>/dev/null && \
+               git show "origin/${BRANCH}:handshake/key.enc" > "$RUNNER_TEMP/key.enc" 2>/dev/null; then
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$found" != 1 ]]; then
+            echo 'Encrypted payload was not supplied before timeout.' >&2
+            exit 2
+          fi
+
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/private.pem" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -in "$RUNNER_TEMP/key.enc" \
+            -out "$RUNNER_TEMP/aes.key"
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in "$RUNNER_TEMP/payload.enc" \
+            -out "$RUNNER_TEMP/payload.tar.gz" \
+            -pass file:"$RUNNER_TEMP/aes.key"
+
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          tar -xzf "$RUNNER_TEMP/payload.tar.gz" -C "$GITHUB_WORKSPACE/work"
+          cd "$GITHUB_WORKSPACE/work/chronosplit_gonogo"
+          export OPENAI_API_KEY="$(cat ../openai_key.txt)"
+          rm -f ../openai_key.txt
+          python -m pip install --disable-pip-version-check -q -r requirements.txt
+          python tests/test_semantics.py
+          mkdir -p results
+          set -o pipefail
+          N_EVENTS=24 MODEL='gpt-5.4-mini-2026-03-17' MAX_COST_USD=8 ./run.sh 2>&1 | tee results/runner.log
+          unset OPENAI_API_KEY
+          rm -f "$RUNNER_TEMP/private.pem" "$RUNNER_TEMP/aes.key" "$RUNNER_TEMP/payload.tar.gz"
+
+      - name: Upload reproducibility artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronosplit-gonogo-results
+          path: |
+            work/chronosplit_gonogo/results/**
+            work/chronosplit_gonogo/src/**
+            work/chronosplit_gonogo/tests/**
+            work/chronosplit_gonogo/README.md
+            work/chronosplit_gonogo/requirements.txt
+          if-no-files-found: warn
+          retention-days: 7
