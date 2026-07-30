@@ -1,0 +1,125 @@
+name: BudgetFork Runtime Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/budgetfork-runtime.yml'
+      - 'budgetfork-runtime/**'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-validation:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out experiment branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Decode and verify harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d budgetfork-runtime/harness.py.gz.b64 | gzip -d > budgetfork-runtime/harness.py
+          echo '46affe036422bcdd106104aa9d4b3b0340c1b47ec4067ba5c70142676d6b382d  budgetfork-runtime/harness.py' | sha256sum -c -
+          python -m py_compile budgetfork-runtime/harness.py
+
+      - name: Fetch pinned public repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p repos
+          git clone -q https://github.com/zhound420/swarm-trader.git repos/swarm-trader
+          git -C repos/swarm-trader checkout -q 3470b8291c438dc36b22ed37b7e56ba2bbf249b5
+          test "$(git -C repos/swarm-trader rev-parse HEAD)" = '3470b8291c438dc36b22ed37b7e56ba2bbf249b5'
+
+          git clone -q https://github.com/virattt/ai-hedge-fund.git repos/ai-hedge-fund
+          git -C repos/ai-hedge-fund checkout -q 9557e64273e212635a4a28cbd8128df22f166c07
+          test "$(git -C repos/ai-hedge-fund rev-parse HEAD)" = '9557e64273e212635a4a28cbd8128df22f166c07'
+
+      - name: Install minimal dependencies
+        run: python -m pip install --disable-pip-version-check -q requests python-dotenv 'pydantic>=2,<3'
+
+      - name: Run repository-runtime experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p budgetfork-runtime/results budgetfork-runtime/evidence
+          python budgetfork-runtime/harness.py \
+            --swarm-repo repos/swarm-trader \
+            --aihf-repo repos/ai-hedge-fund \
+            --out budgetfork-runtime/results \
+            --n-each 2000 \
+            | tee budgetfork-runtime/results/stdout.json
+
+      - name: Verify preregistered semantic checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('budgetfork-runtime/results/summary.json').read_text())
+          attacks=[x for x in s['concrete_cases'] if x['scenario']!='aggregate_safe_control']
+          safe=[x for x in s['concrete_cases'] if x['scenario']=='aggregate_safe_control'][0]
+          assert all(x['all_local_approved'] for x in attacks)
+          assert all(x['set_level_violation'] for x in attacks)
+          assert safe['all_local_approved'] and not safe['set_level_violation']
+          assert all(x['first_approved'] and x['second_approved_after_broker_refetch'] for x in s['pending_fork'])
+          assert all(x['unmodified_set_violation'] for x in s['pending_fork'])
+          assert all(not x['reservation_defense_second_approved'] for x in s['pending_fork'])
+          assert s['randomized']['safe']['set_level_violation_rate'] == 0
+          assert all(s['randomized'][k]['set_level_violation_rate'] >= 0.80 for k in ['cash','open_positions','sector','tactical','trade_count'])
+          neg=s['negative_control_aihf_v2']
+          assert neg['weight_limit_violations']==0 and neg['order_gross_violations']==0
+          print('All preregistered semantic checks passed.')
+          PY
+
+      - name: Preserve source evidence and run manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp repos/swarm-trader/risk_manager.py budgetfork-runtime/evidence/swarm_risk_manager.py
+          cp repos/swarm-trader/src/alpaca_integration.py budgetfork-runtime/evidence/swarm_alpaca_integration.py
+          cp repos/ai-hedge-fund/v2/risk/limits.py budgetfork-runtime/evidence/aihf_v2_limits.py
+          cp repos/ai-hedge-fund/v2/pipeline/execution.py budgetfork-runtime/evidence/aihf_v2_execution.py
+          cp repos/ai-hedge-fund/v2/pipeline/run_cycle.py budgetfork-runtime/evidence/aihf_v2_run_cycle.py
+          python - <<'PY'
+          import hashlib, json, platform, subprocess
+          from pathlib import Path
+          def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          m={
+            'python': platform.python_version(),
+            'harness_sha256': sha('budgetfork-runtime/harness.py'),
+            'swarm_commit': subprocess.check_output(['git','-C','repos/swarm-trader','rev-parse','HEAD'],text=True).strip(),
+            'aihf_commit': subprocess.check_output(['git','-C','repos/ai-hedge-fund','rev-parse','HEAD'],text=True).strip(),
+            'offline_only': True,
+            'broker_credentials_used': False,
+            'orders_sent': False,
+          }
+          Path('budgetfork-runtime/results/run_manifest.json').write_text(json.dumps(m,indent=2))
+          PY
+          python -m pip freeze > budgetfork-runtime/results/pip_freeze.txt
+          sha256sum budgetfork-runtime/harness.py budgetfork-runtime/results/* budgetfork-runtime/evidence/* > budgetfork-runtime/results/MANIFEST.sha256
+
+      - name: Upload reproducibility artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: budgetfork-runtime-results
+          path: |
+            budgetfork-runtime/harness.py
+            budgetfork-runtime/results/**
+            budgetfork-runtime/evidence/**
+          if-no-files-found: error
+          retention-days: 7
