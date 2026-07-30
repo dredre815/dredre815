@@ -1,0 +1,32 @@
+name: Verify Root-Fanout Source Chunks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-rootfanout-source.yml'
+      - 'handshake-rootfanout-v3/source.part.*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+      - name: Report and verify chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          wc -c handshake-rootfanout-v3/source.part.*
+          sha256sum handshake-rootfanout-v3/source.part.*
+          cat handshake-rootfanout-v3/source.part.* > /tmp/source.tar.gz.b64
+          echo CONCAT
+          wc -c /tmp/source.tar.gz.b64
+          sha256sum /tmp/source.tar.gz.b64
+          base64 -d /tmp/source.tar.gz.b64 > /tmp/source.tar.gz
+          tar -tzf /tmp/source.tar.gz | head -20
