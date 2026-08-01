@@ -31,7 +31,16 @@ def main() -> None:
     if replacement not in text:
         if marker not in text:
             raise RuntimeError("rdagent_gate.py import marker not found")
-        gate.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
-    print(f"extracted harness to {a.out}; sha256={actual}; mlflow_file_store_hotfix=true")
+        text = text.replace(marker, replacement, 1)
+    # I/O hotfix: direct score verification writes a temporary checker into a
+    # dedicated subdirectory. Create that directory before writing the script.
+    direct_marker = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    script = work_dir / "direct_ic_check.py"'
+    direct_replacement = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    work_dir.mkdir(parents=True, exist_ok=True)\n    script = work_dir / "direct_ic_check.py"'
+    if direct_replacement not in text:
+        if direct_marker not in text:
+            raise RuntimeError("direct_qlib_ic marker not found")
+        text = text.replace(direct_marker, direct_replacement, 1)
+    gate.write_text(text, encoding="utf-8")
+    print(f"extracted harness to {a.out}; sha256={actual}; mlflow_file_store_hotfix=true; direct_ic_dir_hotfix=true")
 if __name__ == "__main__":
     main()
