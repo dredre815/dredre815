@@ -23,30 +23,33 @@ def main() -> None:
         tf.extractall(a.out, filter="data")
     gate = a.out / "rdagent_gate.py"
     text = gate.read_text(encoding="utf-8")
-    # Compatibility hotfix for MLflow >=3.5: the frozen Qlib target still uses
-    # the legacy local file tracking backend. Storage plumbing only.
     marker = "import os\n"
     replacement = 'import os\nos.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")\n'
     if replacement not in text:
         if marker not in text:
             raise RuntimeError("rdagent_gate.py import marker not found")
         text = text.replace(marker, replacement, 1)
-    # Direct score verification writes a helper into a dedicated subdirectory.
     direct_marker = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    script = work_dir / "direct_ic_check.py"'
     direct_replacement = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    work_dir.mkdir(parents=True, exist_ok=True)\n    script = work_dir / "direct_ic_check.py"'
     if direct_replacement not in text:
         if direct_marker not in text:
             raise RuntimeError("direct_qlib_ic marker not found")
         text = text.replace(direct_marker, direct_replacement, 1)
-    # Use the concrete experiment classes expected by the frozen runners. The
-    # similarly named classes in quant_experiment.py are distinct Python types.
     class_marker = 'from rdagent.scenarios.qlib.experiment.quant_experiment import QlibFactorExperiment, QlibModelExperiment'
     class_replacement = 'from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment\n    from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment'
     if class_replacement not in text:
         if class_marker not in text:
             raise RuntimeError("concrete experiment class import marker not found")
         text = text.replace(class_marker, class_replacement, 1)
+    # RDAgentSettings has no RD_AGENT_ prefix; add the actual Pydantic field name
+    # so local test-workspace objects are not serialized after successful runs.
+    cache_env_marker = '"RD_AGENT_CACHE_WITH_PICKLE": "false",'
+    cache_env_replacement = '"RD_AGENT_CACHE_WITH_PICKLE": "false",\n            "CACHE_WITH_PICKLE": "false",'
+    if cache_env_replacement not in text:
+        if cache_env_marker not in text:
+            raise RuntimeError("cache environment marker not found")
+        text = text.replace(cache_env_marker, cache_env_replacement, 1)
     gate.write_text(text, encoding="utf-8")
-    print(f"extracted harness to {a.out}; sha256={actual}; compatibility_hotfixes=mlflow,direct_ic_dir,concrete_experiment_classes")
+    print(f"extracted harness to {a.out}; sha256={actual}; compatibility_hotfixes=mlflow,direct_ic_dir,concrete_experiment_classes,cache_env")
 if __name__ == "__main__":
     main()
