@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   live-gate:
@@ -51,9 +53,12 @@ jobs:
           python3 bootstrap_harness.py --out experiments
           python3 -m py_compile experiments/*.py
 
-      - name: Generate ephemeral RSA handoff key
+      - name: Generate and publish ephemeral RSA handoff key
         if: env.ALPHALEAK_PASSIVE != 'true'
         shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
         run: |
           set -euo pipefail
           umask 077
@@ -61,6 +66,8 @@ jobs:
           openssl pkey -in /tmp/alphaleak-private.pem -pubout -out /tmp/alphaleak-public.pem >/dev/null 2>&1
           PUBLIC_KEY_B64="$(base64 -w0 /tmp/alphaleak-public.pem)"
           echo "ALPHALEAK_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="AlphaLeak encrypted-key handoff for workflow run ${GITHUB_RUN_ID}. The matching private key exists only in this runner.\n\nALPHALEAK_KEY_RUN=${GITHUB_RUN_ID}\nALPHALEAK_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
           echo "The private key exists only in /tmp of this runner and is never uploaded."
 
       - name: Free runner disk space
