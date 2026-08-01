@@ -21,26 +21,32 @@ def main() -> None:
             if a.out.resolve() not in target.parents and target != a.out.resolve():
                 raise RuntimeError(f"unsafe archive member: {member.name}")
         tf.extractall(a.out, filter="data")
-    # Compatibility hotfix for MLflow >=3.5: the frozen Qlib target still uses the
-    # legacy local file tracking backend. This changes storage plumbing only; it
-    # does not alter factors, labels, predictions, metrics, or the attack logic.
     gate = a.out / "rdagent_gate.py"
     text = gate.read_text(encoding="utf-8")
+    # Compatibility hotfix for MLflow >=3.5: the frozen Qlib target still uses
+    # the legacy local file tracking backend. Storage plumbing only.
     marker = "import os\n"
     replacement = 'import os\nos.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")\n'
     if replacement not in text:
         if marker not in text:
             raise RuntimeError("rdagent_gate.py import marker not found")
         text = text.replace(marker, replacement, 1)
-    # I/O hotfix: direct score verification writes a temporary checker into a
-    # dedicated subdirectory. Create that directory before writing the script.
+    # Direct score verification writes a helper into a dedicated subdirectory.
     direct_marker = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    script = work_dir / "direct_ic_check.py"'
     direct_replacement = 'def direct_qlib_ic(conda_env: str, pred_path: Path, label_path: Path, work_dir: Path) -> dict:\n    work_dir.mkdir(parents=True, exist_ok=True)\n    script = work_dir / "direct_ic_check.py"'
     if direct_replacement not in text:
         if direct_marker not in text:
             raise RuntimeError("direct_qlib_ic marker not found")
         text = text.replace(direct_marker, direct_replacement, 1)
+    # Use the concrete experiment classes expected by the frozen runners. The
+    # similarly named classes in quant_experiment.py are distinct Python types.
+    class_marker = 'from rdagent.scenarios.qlib.experiment.quant_experiment import QlibFactorExperiment, QlibModelExperiment'
+    class_replacement = 'from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment\n    from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment'
+    if class_replacement not in text:
+        if class_marker not in text:
+            raise RuntimeError("concrete experiment class import marker not found")
+        text = text.replace(class_marker, class_replacement, 1)
     gate.write_text(text, encoding="utf-8")
-    print(f"extracted harness to {a.out}; sha256={actual}; mlflow_file_store_hotfix=true; direct_ic_dir_hotfix=true")
+    print(f"extracted harness to {a.out}; sha256={actual}; compatibility_hotfixes=mlflow,direct_ic_dir,concrete_experiment_classes")
 if __name__ == "__main__":
     main()
