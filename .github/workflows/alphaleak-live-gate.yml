@@ -1,0 +1,283 @@
+name: AlphaLeak Live Feasibility Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "experiments/**"
+      - "requirements-ci.txt"
+      - ".github/workflows/alphaleak-live-gate.yml"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  live-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      RDAGENT_COMMIT: "4f9ecb005881cddc08df0124a2e894c018007679"
+      QLIB_COMMIT: "2fb9380b342556ddb50a4b24e4fe8655d548b2b8"
+      RESULTS_DIR: "${{ github.workspace }}/live_results"
+      TARGETS_DIR: "${{ github.workspace }}/targets"
+
+    steps:
+      - name: Checkout experiment harness
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect passive handoff run
+        id: passive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f experiments/secret_payload.b64 ]]; then
+            echo "The encrypted handoff commit triggered this second PR run; the original run owns the matching private key."
+            echo "ALPHALEAK_PASSIVE=true" >> "$GITHUB_ENV"
+            echo "passive=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ALPHALEAK_PASSIVE=false" >> "$GITHUB_ENV"
+            echo "passive=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Materialize verified experiment harness
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 bootstrap_harness.py --out experiments
+          python3 -m py_compile experiments/*.py
+
+      - name: Generate and publish ephemeral RSA handoff key
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/alphaleak-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/alphaleak-private.pem -pubout -out /tmp/alphaleak-public.pem >/dev/null 2>&1
+          PUBLIC_KEY_B64="$(base64 -w0 /tmp/alphaleak-public.pem)"
+          echo "ALPHALEAK_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="AlphaLeak encrypted-key handoff for workflow run ${GITHUB_RUN_ID}. The matching private key exists only in this runner.\n\nALPHALEAK_KEY_RUN=${GITHUB_RUN_ID}\nALPHALEAK_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+          echo "The private key exists only in /tmp of this runner and is never uploaded."
+
+      - name: Free runner disk space
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          docker system prune -af || true
+          df -h
+
+      - name: Set up Python
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Miniconda
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: base
+          auto-activate: false
+          miniconda-version: "latest"
+
+      - name: Install system packages
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libhdf5-dev libgomp1 openssl curl git
+
+      - name: Checkout frozen targets
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TARGETS_DIR"
+          git clone --filter=blob:none https://github.com/microsoft/RD-Agent.git "$TARGETS_DIR/RD-Agent"
+          git -C "$TARGETS_DIR/RD-Agent" checkout --detach "$RDAGENT_COMMIT"
+          test "$(git -C "$TARGETS_DIR/RD-Agent" rev-parse HEAD)" = "$RDAGENT_COMMIT"
+          git clone --filter=blob:none https://github.com/microsoft/qlib.git "$TARGETS_DIR/qlib"
+          git -C "$TARGETS_DIR/qlib" checkout --detach "$QLIB_COMMIT"
+          test "$(git -C "$TARGETS_DIR/qlib" rev-parse HEAD)" = "$QLIB_COMMIT"
+
+      - name: Install harness and minimal RD-Agent dependencies
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -e "$TARGETS_DIR/RD-Agent" --no-deps
+          python - <<'PY'
+          import numpy, pandas, scipy, tables, docker, openai
+          print("base dependency smoke passed")
+          PY
+
+      - name: Build frozen Qlib conda environment
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          conda create -y -n rdagent4qlib python=3.10
+          conda run -n rdagent4qlib python -m pip install --upgrade pip wheel setuptools cython
+          conda run -n rdagent4qlib python -m pip install "numpy==1.26.4" "pandas==2.0.3" "scipy<1.13" pyarrow tables lightgbm xgboost scikit-learn mlflow
+          conda run -n rdagent4qlib python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          conda run -n rdagent4qlib python -m pip install -e "$TARGETS_DIR/qlib"
+          conda run -n rdagent4qlib python - <<'PY'
+          import qlib, torch, lightgbm, pandas
+          print("qlib", qlib.__version__ if hasattr(qlib, "__version__") else "unknown")
+          print("torch", torch.__version__)
+          PY
+
+      - name: Download Qlib China daily data
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.qlib/qlib_data"
+          conda run -n rdagent4qlib python "$TARGETS_DIR/qlib/scripts/get_data.py" qlib_data \
+            --target_dir "$HOME/.qlib/qlib_data/cn_data" --region cn
+          test -d "$HOME/.qlib/qlib_data/cn_data"
+          du -sh "$HOME/.qlib/qlib_data/cn_data"
+
+      - name: Build hardened factor sandbox
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t alphaleak-factor-sandbox:latest experiments/factor_sandbox
+
+      - name: Prepare point-in-time index and frozen labels
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          conda run -n rdagent4qlib env PYTHONPATH="$GITHUB_WORKSPACE/experiments" \
+            python experiments/prepare_data.py --out "$RESULTS_DIR" 2>&1 | tee "$RESULTS_DIR/prepare_data.log"
+
+      - name: Gate 1 - causal capability
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/experiments:$TARGETS_DIR/RD-Agent" \
+            python experiments/causal_gate.py \
+              --rdagent-root "$TARGETS_DIR/RD-Agent" \
+              --factor-dir "$RESULTS_DIR/factor_index_only" \
+              --out "$RESULTS_DIR" 2>&1 | tee "$RESULTS_DIR/causal_gate.log"
+
+      - name: Gate 3 and budget ablations - real Qlib panel
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          conda run -n rdagent4qlib env PYTHONPATH="$GITHUB_WORKSPACE/experiments" \
+            python experiments/panel_gate.py \
+              --labels "$RESULTS_DIR/qlib_labels.parquet" \
+              --out "$RESULTS_DIR" --windows 20 --target-days 20 \
+              2>&1 | tee "$RESULTS_DIR/panel_gate.log"
+
+      - name: Gates 2 and 4 - real RD-Agent/Qlib evaluator and role composition
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/experiments:$TARGETS_DIR/RD-Agent" \
+            python experiments/rdagent_gate.py \
+              --rdagent-root "$TARGETS_DIR/RD-Agent" \
+              --factor-dir "$RESULTS_DIR/factor_index_only" \
+              --out "$RESULTS_DIR" \
+              2>&1 | tee "$RESULTS_DIR/rdagent_gate.log"
+
+      - name: Await encrypted one-time OpenAI key and run Gate 5
+        if: env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_HEAD_REF}"
+          FOUND=0
+          for attempt in $(seq 1 240); do
+            URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/experiments/secret_payload.b64?nonce=$(date +%s%N)"
+            if curl --fail --silent --show-error --location -H 'Cache-Control: no-cache' "$URL" -o /tmp/alphaleak-cipher.b64; then
+              if [[ -s /tmp/alphaleak-cipher.b64 ]] && grep -Eq '^[A-Za-z0-9+/=[:space:]]+$' /tmp/alphaleak-cipher.b64; then
+                FOUND=1
+                break
+              fi
+            fi
+            sleep 10
+          done
+          if [[ "$FOUND" != "1" ]]; then
+            echo "Encrypted key handoff was not received." >&2
+            exit 1
+          fi
+          tr -d '\r\n ' < /tmp/alphaleak-cipher.b64 | base64 -d > /tmp/alphaleak-cipher.bin
+          OPENAI_API_KEY="$(openssl pkeyutl -decrypt \
+            -inkey /tmp/alphaleak-private.pem \
+            -in /tmp/alphaleak-cipher.bin \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256)"
+          test -n "$OPENAI_API_KEY"
+          echo "::add-mask::$OPENAI_API_KEY"
+          export OPENAI_API_KEY
+          PYTHONPATH="$GITHUB_WORKSPACE/experiments" \
+            python experiments/llm_gate.py \
+              --rdagent-results "$RESULTS_DIR" --out "$RESULTS_DIR" --trials 10 \
+              2>&1 | tee "$RESULTS_DIR/llm_gate.log"
+          unset OPENAI_API_KEY
+          shred -u /tmp/alphaleak-cipher.bin /tmp/alphaleak-cipher.b64 /tmp/alphaleak-private.pem /tmp/alphaleak-public.pem || true
+
+      - name: Build final report
+        if: always() && env.ALPHALEAK_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR/final"
+          PYTHONPATH="$GITHUB_WORKSPACE/experiments" \
+            python experiments/build_report.py --results "$RESULTS_DIR" --out "$RESULTS_DIR/final" \
+            2>&1 | tee "$RESULTS_DIR/build_report.log" || true
+          python - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          out = Path(os.environ["RESULTS_DIR"]) / "workflow_provenance.json"
+          def cmd(x):
+              try: return subprocess.check_output(x, text=True, stderr=subprocess.STDOUT).strip()
+              except Exception as e: return f"unavailable:{type(e).__name__}"
+          out.write_text(json.dumps({
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "head_ref": os.environ.get("GITHUB_HEAD_REF"),
+              "runner_os": os.environ.get("RUNNER_OS"),
+              "platform": platform.platform(),
+              "python": platform.python_version(),
+              "docker": cmd(["docker", "--version"]),
+              "conda": cmd(["conda", "--version"]),
+              "rdagent_commit": os.environ.get("RDAGENT_COMMIT"),
+              "qlib_commit": os.environ.get("QLIB_COMMIT"),
+          }, indent=2))
+          PY
+          find "$RESULTS_DIR" -maxdepth 3 -type f -printf '%P\n' | sort
+
+      - name: Upload complete evidence bundle
+        if: always() && env.ALPHALEAK_PASSIVE != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphaleak-live-gate-${{ github.run_id }}
+          path: live_results/
+          if-no-files-found: warn
+          retention-days: 7

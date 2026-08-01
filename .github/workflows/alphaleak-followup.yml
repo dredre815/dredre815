@@ -1,0 +1,208 @@
+name: AlphaLeak Follow-up Robustness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "followup/**"
+      - "experiments/followup_secret_payload.b64"
+      - ".github/workflows/alphaleak-followup.yml"
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  followup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PRIOR_ARTIFACT_ID: "8815259198"
+      RESULTS_DIR: "${{ github.workspace }}/followup_results"
+      PRIOR_DIR: "${{ github.workspace }}/prior_results"
+
+    steps:
+      - name: Checkout follow-up harness
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect passive encrypted-handoff run
+        id: passive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f experiments/followup_secret_payload.b64 ]]; then
+            echo "ALPHALEAK_FOLLOWUP_PASSIVE=true" >> "$GITHUB_ENV"
+            echo "passive=true" >> "$GITHUB_OUTPUT"
+            echo "Ciphertext commit triggered a passive companion run; the original runner owns the matching private key."
+          else
+            echo "ALPHALEAK_FOLLOWUP_PASSIVE=false" >> "$GITHUB_ENV"
+            echo "passive=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish ephemeral RSA handoff key
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/alphaleak-followup-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/alphaleak-followup-private.pem -pubout -out /tmp/alphaleak-followup-public.pem >/dev/null 2>&1
+          PUBLIC_KEY_B64="$(base64 -w0 /tmp/alphaleak-followup-public.pem)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="AlphaLeak follow-up encrypted-key handoff for workflow run ${GITHUB_RUN_ID}. The matching private key exists only in this runner.\n\nALPHALEAK_FOLLOWUP_KEY_RUN=${GITHUB_RUN_ID}\nALPHALEAK_FOLLOWUP_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+          echo "Follow-up public key published; private key remains only in runner /tmp."
+
+      - name: Set up Python
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install follow-up dependencies
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install \
+            "numpy==1.26.4" "pandas==2.0.3" "scipy==1.11.4" \
+            "pyarrow==19.0.1" "matplotlib>=3.8,<4" \
+            "openai>=2.52,<3"
+          python3 followup/bootstrap_followup.py --out followup_runtime
+          python - <<'PYHOTFIX'
+          from pathlib import Path
+          p = Path("followup_runtime/llm_gate_v2.py")
+          s = p.read_text(encoding="utf-8")
+          header_old = '    ctx = context_text(kind, context)\n    return f"""Review case nonce: {nonce}\n'
+          header_new = '    ctx = context_text(kind, context)\n    rendered_code = code if code.startswith("MODEL ARTIFACT:") else "```python\\n" + code + "\\n```"\n    return f"""Review case nonce: {nonce}\n'
+          expr_old = "{code if code.startswith('MODEL ARTIFACT:') else f'```python\\n{code}\\n```'}"
+          if header_old not in s or expr_old not in s:
+              raise RuntimeError("Python 3.11 f-string hotfix markers not found")
+          p.write_text(s.replace(header_old, header_new, 1).replace(expr_old, "{rendered_code}", 1), encoding="utf-8")
+          print("Applied Python 3.11 nested-f-string compatibility hotfix")
+          PYHOTFIX
+          python -m py_compile followup_runtime/*.py
+
+      - name: Download frozen prior evidence artifact
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRIOR_DIR" "$RESULTS_DIR"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRIOR_ARTIFACT_ID}/zip" \
+            -o /tmp/alphaleak-prior.zip
+          unzip -t /tmp/alphaleak-prior.zip >/dev/null
+          unzip -q /tmp/alphaleak-prior.zip -d "$PRIOR_DIR"
+          test -f "$PRIOR_DIR/qlib_labels.parquet"
+          test -f "$PRIOR_DIR/rdagent_model_payload.json"
+          test -f "$PRIOR_DIR/rdagent_factor_payload.json"
+          sha256sum /tmp/alphaleak-prior.zip > "$RESULTS_DIR/prior_artifact_zip.sha256"
+
+      - name: Real-market score precision and noise defenses
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python followup_runtime/feedback_defense_sweep.py \
+            --labels "$PRIOR_DIR/qlib_labels.parquet" \
+            --out "$RESULTS_DIR" \
+            --days 120 --noise-reps 4 \
+            2>&1 | tee "$RESULTS_DIR/feedback_defense.log"
+
+      - name: Await encrypted one-time OpenAI key and run robust LLM factorial
+        if: env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_HEAD_REF}"
+          FOUND=0
+          for attempt in $(seq 1 180); do
+            URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/experiments/followup_secret_payload.b64?nonce=$(date +%s%N)"
+            if curl --fail --silent --show-error --location -H 'Cache-Control: no-cache' "$URL" -o /tmp/alphaleak-followup-cipher.b64; then
+              if [[ -s /tmp/alphaleak-followup-cipher.b64 ]] && grep -Eq '^[A-Za-z0-9+/=[:space:]]+$' /tmp/alphaleak-followup-cipher.b64; then
+                FOUND=1
+                break
+              fi
+            fi
+            sleep 10
+          done
+          if [[ "$FOUND" != "1" ]]; then
+            echo "Encrypted follow-up key handoff was not received." >&2
+            exit 1
+          fi
+          tr -d '\r\n ' < /tmp/alphaleak-followup-cipher.b64 | base64 -d > /tmp/alphaleak-followup-cipher.bin
+          OPENAI_API_KEY="$(openssl pkeyutl -decrypt \
+            -inkey /tmp/alphaleak-followup-private.pem \
+            -in /tmp/alphaleak-followup-cipher.bin \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256)"
+          test -n "$OPENAI_API_KEY"
+          echo "::add-mask::$OPENAI_API_KEY"
+          export OPENAI_API_KEY
+          python followup_runtime/llm_gate_v2.py \
+            --prior-results "$PRIOR_DIR" \
+            --out "$RESULTS_DIR" \
+            --trials 15 --workers 8 --max-attempts 6 \
+            2>&1 | tee "$RESULTS_DIR/llm_gate_v2.log"
+          unset OPENAI_API_KEY
+          shred -u \
+            /tmp/alphaleak-followup-cipher.bin \
+            /tmp/alphaleak-followup-cipher.b64 \
+            /tmp/alphaleak-followup-private.pem \
+            /tmp/alphaleak-followup-public.pem || true
+
+      - name: Build follow-up report
+        if: always() && env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR/final"
+          python followup_runtime/build_followup_report.py \
+            --results "$RESULTS_DIR" --prior "$PRIOR_DIR" --out "$RESULTS_DIR/final" \
+            2>&1 | tee "$RESULTS_DIR/build_followup_report.log" || true
+          python - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          out = Path(os.environ["RESULTS_DIR"]) / "followup_provenance.json"
+          def cmd(args):
+              try:
+                  return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
+              except Exception as exc:
+                  return f"unavailable:{type(exc).__name__}"
+          out.write_text(json.dumps({
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "head_ref": os.environ.get("GITHUB_HEAD_REF"),
+              "runner_os": os.environ.get("RUNNER_OS"),
+              "platform": platform.platform(),
+              "python": platform.python_version(),
+              "pip_freeze_sha256": cmd(["bash", "-lc", "python -m pip freeze | sha256sum"]),
+              "prior_artifact_id": os.environ.get("PRIOR_ARTIFACT_ID"),
+              "openai_model_snapshot": "gpt-5.4-mini-2026-03-17",
+          }, indent=2), encoding="utf-8")
+          PY
+          find "$RESULTS_DIR" -maxdepth 3 -type f -printf '%P\n' | sort
+
+      - name: Upload follow-up evidence bundle
+        if: always() && env.ALPHALEAK_FOLLOWUP_PASSIVE != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphaleak-followup-${{ github.run_id }}
+          path: followup_results/
+          if-no-files-found: error
+          retention-days: 14
