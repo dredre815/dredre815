@@ -21,6 +21,17 @@ def main() -> None:
             if a.out.resolve() not in target.parents and target != a.out.resolve():
                 raise RuntimeError(f"unsafe archive member: {member.name}")
         tf.extractall(a.out, filter="data")
-    print(f"extracted harness to {a.out}; sha256={actual}")
+    # Compatibility hotfix for MLflow >=3.5: the frozen Qlib target still uses the
+    # legacy local file tracking backend. This changes storage plumbing only; it
+    # does not alter factors, labels, predictions, metrics, or the attack logic.
+    gate = a.out / "rdagent_gate.py"
+    text = gate.read_text(encoding="utf-8")
+    marker = "import os\n"
+    replacement = 'import os\nos.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")\n'
+    if replacement not in text:
+        if marker not in text:
+            raise RuntimeError("rdagent_gate.py import marker not found")
+        gate.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
+    print(f"extracted harness to {a.out}; sha256={actual}; mlflow_file_store_hotfix=true")
 if __name__ == "__main__":
     main()
