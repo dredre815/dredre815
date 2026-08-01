@@ -1,0 +1,104 @@
+name: ForkLeak Defense-Gap Extension
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "forkleak/defense_gap.py"
+      - ".github/workflows/forkleak-defense-gap.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  defense-gap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRIOR_ARTIFACT_ID: "8817506094"
+      PRIOR_DIR: "${{ github.workspace }}/forkleak_prior"
+      OUT_DIR: "${{ github.workspace }}/forkleak_defense_gap"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout extension
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download frozen ForkLeak evidence
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRIOR_DIR" "$OUT_DIR"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRIOR_ARTIFACT_ID}/zip" \
+            -o /tmp/forkleak-prior.zip
+          unzip -t /tmp/forkleak-prior.zip >/dev/null
+          unzip -q /tmp/forkleak-prior.zip -d "$PRIOR_DIR"
+          test -f "$PRIOR_DIR/paper_assessment.json"
+          test -f "$PRIOR_DIR/framework_native_details.json"
+          sha256sum /tmp/forkleak-prior.zip > "$OUT_DIR/prior_artifact_zip.sha256"
+
+      - name: Compare replay defenses and lineage accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python forkleak/defense_gap.py \
+            --prior "$PRIOR_DIR" \
+            --out "$OUT_DIR" \
+            --ledger-repeats 50 \
+            2>&1 | tee "$OUT_DIR/defense_gap.log"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ["OUT_DIR"]) / "defense_gap_result.json").read_text())
+          if not result["gate"]["all"]:
+              raise SystemExit("ForkLeak defense-gap gate failed")
+          print(json.dumps(result["gate"], indent=2))
+          PY
+
+      - name: Record provenance
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          def cmd(command):
+              try:
+                  return subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT).strip()
+              except Exception as exc:
+                  return f"unavailable:{type(exc).__name__}"
+          out = Path(os.environ["OUT_DIR"]) / "provenance.json"
+          out.write_text(json.dumps({
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "head_ref": os.environ.get("GITHUB_HEAD_REF"),
+              "platform": platform.platform(),
+              "python": platform.python_version(),
+              "prior_artifact_id": os.environ.get("PRIOR_ARTIFACT_ID"),
+              "script_sha256": cmd("sha256sum forkleak/defense_gap.py"),
+          }, indent=2), encoding="utf-8")
+          PY
+          find "$OUT_DIR" -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Upload defense-gap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkleak-defense-gap-${{ github.run_id }}
+          path: forkleak_defense_gap/
+          if-no-files-found: error
+          retention-days: 14
