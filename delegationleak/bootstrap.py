@@ -10,6 +10,8 @@ import io
 import tarfile
 from pathlib import Path
 
+from patch_runtime import patch
+
 EXPECTED_SHA256 = "bc1fe6f2036be7a5b1fb76267b77866eccf0674edd214c267c177126a9020406"
 
 
@@ -59,6 +61,9 @@ def main() -> None:
         tf.extractall(args.out, members=safe_members(tf, args.out))
 
     runtime = args.out / "runtime"
+    for name in ("prepare_sample.py", "market_sweep.py"):
+        patch(runtime / name)
+
     required = {
         "common.py",
         "prepare_sample.py",
