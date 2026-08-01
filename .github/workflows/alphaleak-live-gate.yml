@@ -82,10 +82,9 @@ jobs:
         if: env.ALPHALEAK_PASSIVE != 'true'
         uses: conda-incubator/setup-miniconda@v3
         with:
-          auto-activate-base: false
-          activate-environment: ""
+          activate-environment: base
+          auto-activate: false
           miniconda-version: "latest"
-          python-version: "3.11"
 
       - name: Install system packages
         if: env.ALPHALEAK_PASSIVE != 'true'
