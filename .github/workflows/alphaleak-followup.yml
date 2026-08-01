@@ -78,6 +78,18 @@ jobs:
             "pyarrow==19.0.1" "matplotlib>=3.8,<4" \
             "openai>=2.52,<3"
           python3 followup/bootstrap_followup.py --out followup_runtime
+          python - <<'PYHOTFIX'
+          from pathlib import Path
+          p = Path("followup_runtime/llm_gate_v2.py")
+          s = p.read_text(encoding="utf-8")
+          header_old = '    ctx = context_text(kind, context)\n    return f"""Review case nonce: {nonce}\n'
+          header_new = '    ctx = context_text(kind, context)\n    rendered_code = code if code.startswith("MODEL ARTIFACT:") else "```python\\n" + code + "\\n```"\n    return f"""Review case nonce: {nonce}\n'
+          expr_old = "{code if code.startswith('MODEL ARTIFACT:') else f'```python\\n{code}\\n```'}"
+          if header_old not in s or expr_old not in s:
+              raise RuntimeError("Python 3.11 f-string hotfix markers not found")
+          p.write_text(s.replace(header_old, header_new, 1).replace(expr_old, "{rendered_code}", 1), encoding="utf-8")
+          print("Applied Python 3.11 nested-f-string compatibility hotfix")
+          PYHOTFIX
           python -m py_compile followup_runtime/*.py
 
       - name: Download frozen prior evidence artifact
