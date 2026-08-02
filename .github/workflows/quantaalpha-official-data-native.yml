@@ -1,0 +1,225 @@
+name: QuantaAlpha Official-Data Native Run
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/quantaalpha-official-data-native.yml"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  native-official-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      TARGET: "${{ github.workspace }}/official_target/QuantaAlpha"
+      HF_DATA: "${{ github.workspace }}/official_hf_data"
+      RESULTS: "${{ github.workspace }}/quanta_official_results"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish runner-bound RSA public key
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/quanta-official-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/quanta-official-private.pem -pubout -out /tmp/quanta-official-public.pem >/dev/null 2>&1
+          PUBLIC_KEY_B64="$(base64 -w0 /tmp/quanta-official-public.pem)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="QuantaAlpha official-data run key handoff. Private key exists only in run ${GITHUB_RUN_ID}.\n\nQUANTA_OFFICIAL_RUN_ID=${GITHUB_RUN_ID}\nQUANTA_OFFICIAL_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+
+      - name: Free disk and set up Python
+        shell: bash
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          docker system prune -af || true
+          df -h
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies and clone exact victim
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libhdf5-dev libgomp1 git curl unzip
+          mkdir -p "$(dirname "$TARGET")" "$HF_DATA" "$RESULTS"
+          git clone --filter=blob:none https://github.com/QuantaAlpha/QuantaAlpha.git "$TARGET"
+          git -C "$TARGET" checkout --detach b7ceb27b1001261d7a95b209a963664ae1f8ab23
+          git -C "$TARGET" rev-parse HEAD | tee "$RESULTS/quantaalpha_commit.txt"
+
+      - name: Install victim runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools cython
+          python -m pip install "numpy==1.26.4" "pandas==2.0.3" "scipy<1.13" pyarrow tables lightgbm xgboost scikit-learn mlflow huggingface_hub
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e "$TARGET"
+
+      - name: Download and place QuantaAlpha's official CSI300 dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          from pathlib import Path
+          import os
+          out=Path(os.environ['HF_DATA'])
+          for name in ('cn_data.zip','daily_pv.h5','daily_pv_debug.h5'):
+              path=hf_hub_download(repo_id='QuantaAlpha/qlib_csi300', filename=name, repo_type='dataset', local_dir=out)
+              print(name, path, Path(path).stat().st_size)
+          PY
+          mkdir -p "$TARGET/data/qlib" \
+                   "$TARGET/git_ignore_folder/factor_implementation_source_data" \
+                   "$TARGET/git_ignore_folder/factor_implementation_source_data_debug"
+          unzip -q "$HF_DATA/cn_data.zip" -d "$TARGET/data/qlib"
+          cp "$HF_DATA/daily_pv.h5" "$TARGET/git_ignore_folder/factor_implementation_source_data/daily_pv.h5"
+          cp "$HF_DATA/daily_pv_debug.h5" "$TARGET/git_ignore_folder/factor_implementation_source_data_debug/daily_pv.h5"
+          find "$TARGET/data/qlib" -maxdepth 2 -type d -printf '%P\n' | sort | tee "$RESULTS/qlib_tree.txt"
+          du -sh "$TARGET/data/qlib" "$TARGET/git_ignore_folder/factor_implementation_source_data" | tee "$RESULTS/data_sizes.txt"
+          python - <<'PY' | tee "$RESULTS/official_data_inventory.json"
+          import json, os, pandas as pd
+          from pathlib import Path
+          p=Path(os.environ['TARGET'])/'git_ignore_folder/factor_implementation_source_data/daily_pv.h5'
+          df=pd.read_hdf(p,key='data')
+          dates=pd.to_datetime(df.index.get_level_values('datetime'))
+          print(json.dumps({'rows':len(df),'columns':[str(x) for x in df.columns], 'min_date':str(dates.min().date()),'max_date':str(dates.max().date()),'instruments':int(df.index.get_level_values('instrument').nunique())},indent=2))
+          PY
+
+      - name: Await encrypted one-time API key
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_HEAD_REF}"
+          FOUND=0
+          for attempt in $(seq 1 240); do
+            URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/experiments/quanta_official_secret_payload.b64?nonce=$(date +%s%N)"
+            if curl --fail --silent --show-error --location -H 'Cache-Control: no-cache' "$URL" -o /tmp/quanta-official-cipher.b64; then
+              if [[ -s /tmp/quanta-official-cipher.b64 ]] && grep -Eq '^[A-Za-z0-9+/=[:space:]]+$' /tmp/quanta-official-cipher.b64; then FOUND=1; break; fi
+            fi
+            sleep 10
+          done
+          [[ "$FOUND" == 1 ]] || { echo 'Encrypted key not received' >&2; exit 1; }
+          tr -d '\r\n ' < /tmp/quanta-official-cipher.b64 | base64 -d > /tmp/quanta-official-cipher.bin
+          OPENAI_API_KEY="$(openssl pkeyutl -decrypt -inkey /tmp/quanta-official-private.pem -in /tmp/quanta-official-cipher.bin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256)"
+          test -n "$OPENAI_API_KEY"
+          echo "::add-mask::$OPENAI_API_KEY"
+          echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> "$GITHUB_ENV"
+          echo "CHAT_OPENAI_API_KEY=$OPENAI_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Verify model access
+        shell: bash
+        run: |
+          python - <<'PY' | tee "$RESULTS/openai_smoke.json"
+          import json, os
+          from openai import OpenAI
+          r=OpenAI(api_key=os.environ['OPENAI_API_KEY']).responses.create(model='gpt-5.4-mini',input='Return exactly OK.',reasoning={'effort':'low'},max_output_tokens=16)
+          print(json.dumps({'response_id_suffix':r.id[-12:],'model':r.model,'status':r.status,'text':r.output_text,'usage':r.usage.model_dump()},indent=2))
+          PY
+
+      - name: Run exact shipped QuantaAlpha defaults on official data
+        shell: bash
+        timeout-minutes: 240
+        env:
+          QLIB_DATA_DIR: "${{ github.workspace }}/official_target/QuantaAlpha/data/qlib/cn_data"
+          DATA_RESULTS_DIR: "${{ github.workspace }}/official_results"
+          FACTOR_CoSTEER_DATA_FOLDER: "${{ github.workspace }}/official_target/QuantaAlpha/git_ignore_folder/factor_implementation_source_data"
+          FACTOR_CoSTEER_DATA_FOLDER_DEBUG: "${{ github.workspace }}/official_target/QuantaAlpha/git_ignore_folder/factor_implementation_source_data_debug"
+          CHAT_MODEL: gpt-5.4-mini
+          REASONING_MODEL: gpt-5.4-mini
+          LOG_LLM_CHAT_CONTENT: "false"
+          DUMP_CHAT_CACHE: "false"
+          USE_CHAT_CACHE: "false"
+          CHAT_STREAM: "false"
+          USE_LOCAL: "true"
+          FACTOR_LIBRARY_SUFFIX: official_native_default
+          EXPERIMENT_ID: official_native_default
+          WORKSPACE_PATH: "${{ github.workspace }}/official_workspace"
+          PICKLE_CACHE_FOLDER_PATH_STR: "${{ github.workspace }}/official_pickle_cache"
+        run: |
+          set -o pipefail
+          cd "$TARGET"
+          timeout 14100 python -m quantaalpha.cli mine \
+            --direction "Explore economically interpretable price-volume factors with distinct horizons. Prefer robustness, causal market rationale, and ordinary deployable Qlib expressions." \
+            --config_path configs/experiment.yaml \
+            2>&1 | tee "$RESULTS/quanta_official_native.log"
+
+      - name: Inventory native artifacts and evaluate discovered factor files on visible and sealed dates
+        if: always()
+        shell: bash
+        env:
+          QLIB_DATA_DIR: "${{ github.workspace }}/official_target/QuantaAlpha/data/qlib/cn_data"
+        run: |
+          set -euo pipefail
+          find "$TARGET" "$GITHUB_WORKSPACE/official_workspace" -name 'all_factors_library*.json' -o -name 'trajectory_pool.json' -o -name 'evolution_state.json' -o -name 'result.h5' 2>/dev/null | sort > "$RESULTS/discovered_artifacts.txt"
+          python real_quant_audit/summarize_quanta.py --repo "$TARGET" --out "$RESULTS" --label official_native_default || true
+          python - <<'PY' | tee "$RESULTS/sealed_factor_evaluation.log"
+          import json, os
+          from pathlib import Path
+          import numpy as np, pandas as pd, qlib
+          from qlib.config import REG_CN
+          from qlib.data import D
+
+          root=Path(os.environ['TARGET'])
+          out=Path(os.environ['RESULTS'])
+          qlib.init(provider_uri=os.environ['QLIB_DATA_DIR'], region=REG_CN)
+          labels=D.features(D.instruments('csi300'), ['$close'], start_time='2020-12-01', end_time='2025-12-31', freq='day').swaplevel().sort_index()
+          close=labels.iloc[:,0]
+          y=close.groupby(level='instrument').shift(-2)/close.groupby(level='instrument').shift(-1)-1
+          y.name='label'
+          rows=[]
+          seen=set()
+          paths=list(root.rglob('result.h5')) + list(Path(os.environ.get('WORKSPACE_PATH','/nonexistent')).rglob('result.h5'))
+          for path in paths:
+              try:
+                  fac=pd.read_hdf(path,key='data')
+              except Exception:
+                  continue
+              if fac.empty or not isinstance(fac.index,pd.MultiIndex): continue
+              for col in fac.columns:
+                  key=(str(path),str(col))
+                  if key in seen: continue
+                  seen.add(key)
+                  s=fac[col].astype(float).rename('factor')
+                  frame=pd.concat([s,y],axis=1).replace([np.inf,-np.inf],np.nan).dropna()
+                  vals={}
+                  for label_name,start,end in [('visible','2021-01-01','2024-12-01'),('sealed','2024-12-02','2025-12-31')]:
+                      part=frame.loc[(slice(start,end),slice(None)),:]
+                      daily=[]
+                      for _,g in part.groupby(level='datetime'):
+                          if len(g)>=20 and g.factor.nunique()>=3 and g.label.nunique()>=3:
+                              daily.append(g.factor.corr(g.label,method='spearman'))
+                      vals[label_name]=float(np.nanmean(daily)) if daily else None
+                  rows.append({'path':str(path.relative_to(root)) if root in path.parents else str(path),'column':str(col),'visible_rankic':vals['visible'],'sealed_rankic':vals['sealed']})
+          pd.DataFrame(rows).to_csv(out/'native_factor_visible_sealed.csv',index=False)
+          print(json.dumps({'factor_series_evaluated':len(rows),'rows':rows},indent=2))
+          PY
+          python -m pip freeze > "$RESULTS/pip-freeze.txt"
+          find "$RESULTS" -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Destroy key material
+        if: always()
+        run: |
+          unset OPENAI_API_KEY CHAT_OPENAI_API_KEY || true
+          shred -u /tmp/quanta-official-private.pem /tmp/quanta-official-public.pem /tmp/quanta-official-cipher.bin /tmp/quanta-official-cipher.b64 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quantaalpha-official-native-${{ github.run_id }}
+          path: quanta_official_results/
+          if-no-files-found: error
+          retention-days: 14
