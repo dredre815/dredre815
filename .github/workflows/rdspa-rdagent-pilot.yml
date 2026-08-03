@@ -40,10 +40,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r rdspa/requirements.txt
 
-      - name: Decode and verify experiment source
+      - name: Reassemble and verify experiment source
         run: |
           set -euo pipefail
-          base64 --decode rdspa/run_rdspa_pilot.py.gz.b64 | gzip --decompress > rdspa/run_rdspa_pilot.py
+          cat rdspa/payload_parts/part00 rdspa/payload_parts/part01 \
+              rdspa/payload_parts/part02 rdspa/payload_parts/part03 \
+              rdspa/payload_parts/part04 rdspa/payload_parts/part05 \
+              > "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64"
+          echo '97067d719de5ee4ce6f7f6623012db59a9c99eb9196439a8350d931cb9b25bd5  '"$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64" | sha256sum --check --strict
+          base64 --decode "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64" | gzip --decompress > rdspa/run_rdspa_pilot.py
           python -m py_compile rdspa/run_rdspa_pilot.py
           test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1463
           echo '50d72b45056ac56cdc2851195914743d812043c53dbc9feb1b14253833e44c88  rdspa/run_rdspa_pilot.py' | sha256sum --check --strict
@@ -153,4 +158,4 @@ jobs:
           set +e
           unset OPENAI_API_KEY
           shred -u "$RUNNER_TEMP/openai.key" "$RUNNER_TEMP/rdspa-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/key.enc.b64"
+          rm -f "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64"
