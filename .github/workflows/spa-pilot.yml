@@ -1,42 +1,37 @@
 name: SPA E1 mechanism pilot
 
 on:
-  push:
-    branches:
-      - spa-pilot-gpt54mini-20260803
+  pull_request:
+    branches: [main]
     paths:
       - 'spa-pilot/**'
       - '.github/workflows/spa-pilot.yml'
-      - '!spa-pilot/results/**'
   workflow_dispatch:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
-  group: spa-e1-${{ github.ref }}
+  group: spa-e1-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
   pilot:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       TA_COMMIT: a33fd4c0f134485a43553a2c23a63cb14adbd88f
       MODEL_SNAPSHOT: gpt-5.4-mini-2026-03-17
-      ISSUE_PREFIX: SPA_CIPHERTEXT_V1
-      AUTHORIZED_LOGIN: dredre815
       MPLBACKEND: Agg
-      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout experiment branch
         uses: actions/checkout@v4
         with:
-          ref: spa-pilot-gpt54mini-20260803
+          ref: ${{ github.head_ref || 'spa-pilot-gpt54mini-20260803' }}
           fetch-depth: 0
+          token: ${{ github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -70,73 +65,55 @@ jobs:
           git -C spa-pilot/vendor/TradingAgents checkout -q --detach FETCH_HEAD
           test "$(git -C spa-pilot/vendor/TradingAgents rev-parse HEAD)" = "$TA_COMMIT"
 
-      - name: Generate ephemeral RSA key and open handoff issue
+      - name: Generate ephemeral RSA public key
         id: handoff
+        env:
+          BRANCH: ${{ github.head_ref || 'spa-pilot-gpt54mini-20260803' }}
         run: |
           set -euo pipefail
+          mkdir -p spa-pilot/handshake
+          if [ -f spa-pilot/handshake/public.pem ]; then
+            echo 'A prior runner owns the matching ephemeral private key; this follow-up run exits without consuming a credential.'
+            echo 'owns_key=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           umask 077
-          PRIVATE_KEY="$RUNNER_TEMP/spa-private.pem"
-          PUBLIC_KEY="$RUNNER_TEMP/spa-public.pem"
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$PRIVATE_KEY" >/dev/null 2>&1
-          openssl pkey -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY" >/dev/null 2>&1
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$RUNNER_TEMP/spa-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/spa-private.pem" -pubout -out spa-pilot/handshake/public.pem >/dev/null 2>&1
 
-          TITLE="[SPA-KEY-EXCHANGE] run-${GITHUB_RUN_ID}"
-          BODY_FILE="$RUNNER_TEMP/issue-body.md"
-          {
-            echo '# Ephemeral key handoff for SPA E1 pilot'
-            echo
-            echo "Workflow run: \`${GITHUB_RUN_ID}\`"
-            echo "Authorized commenter: \`${AUTHORIZED_LOGIN}\`"
-            echo
-            echo 'Encrypt the one-use OpenAI API key with RSA-OAEP, SHA-256 for OAEP and MGF1, then post one single-line comment:'
-            echo
-            echo "\`${ISSUE_PREFIX}:${GITHUB_RUN_ID}:<base64-ciphertext>\`"
-            echo
-            echo 'The private key exists only on this ephemeral runner and is destroyed after the experiment.'
-            echo
-            echo '```pem'
-            cat "$PUBLIC_KEY"
-            echo '```'
-          } > "$BODY_FILE"
-
-          jq -n --arg title "$TITLE" --rawfile body "$BODY_FILE" '{title:$title, body:$body}' > "$RUNNER_TEMP/issue.json"
-          ISSUE_RESPONSE="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input "$RUNNER_TEMP/issue.json")"
-          ISSUE_NUMBER="$(jq -r '.number' <<<"$ISSUE_RESPONSE")"
-          test "$ISSUE_NUMBER" != null
-          printf '%s\n' "$ISSUE_NUMBER" > "$RUNNER_TEMP/spa-issue-number"
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "Key handoff issue opened: #$ISSUE_NUMBER"
+          git config user.name 'spa-e1-runner'
+          git config user.email 'spa-e1-runner@users.noreply.github.com'
+          git add spa-pilot/handshake/public.pem
+          git commit -m 'SPA E1: publish ephemeral encryption key'
+          git push origin "HEAD:${BRANCH}"
+          echo 'owns_key=true' >> "$GITHUB_OUTPUT"
 
       - name: Wait for encrypted key and run preregistered pilot
+        if: steps.handoff.outputs.owns_key == 'true'
+        env:
+          BRANCH: ${{ github.head_ref || 'spa-pilot-gpt54mini-20260803' }}
         run: |
           set -euo pipefail
           umask 077
-          ISSUE_NUMBER="$(cat "$RUNNER_TEMP/spa-issue-number")"
-          EXPECTED_PREFIX="${ISSUE_PREFIX}:${GITHUB_RUN_ID}:"
-          CIPHERTEXT=''
-
+          found=0
           for _ in $(seq 1 240); do
-            CIPHERTEXT="$(
-              gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100" \
-                | jq -r --arg login "$AUTHORIZED_LOGIN" --arg prefix "$EXPECTED_PREFIX" \
-                  '[.[] | select(.user.login == $login and (.body | startswith($prefix))) | .body] | last // empty' \
-                | sed "s#^${EXPECTED_PREFIX}##"
-            )"
-            if [ -n "$CIPHERTEXT" ]; then
+            git fetch -q origin "$BRANCH"
+            if git show "origin/${BRANCH}:spa-pilot/handshake/openai_key.enc.b64" > "$RUNNER_TEMP/openai_key.enc.b64" 2>/dev/null; then
+              found=1
               break
             fi
             sleep 10
           done
-
-          if [ -z "$CIPHERTEXT" ]; then
-            echo 'No authorized ciphertext arrived before timeout.' >&2
-            exit 1
+          if [ "$found" != 1 ]; then
+            echo 'Encrypted API key was not supplied before timeout.' >&2
+            exit 2
           fi
 
-          printf '%s' "$CIPHERTEXT" | base64 --decode > "$RUNNER_TEMP/spa-cipher.bin"
+          base64 --decode "$RUNNER_TEMP/openai_key.enc.b64" > "$RUNNER_TEMP/openai_key.enc"
           openssl pkeyutl -decrypt \
             -inkey "$RUNNER_TEMP/spa-private.pem" \
-            -in "$RUNNER_TEMP/spa-cipher.bin" \
+            -in "$RUNNER_TEMP/openai_key.enc" \
             -pkeyopt rsa_padding_mode:oaep \
             -pkeyopt rsa_oaep_md:sha256 \
             -pkeyopt rsa_mgf1_md:sha256 \
@@ -160,11 +137,12 @@ jobs:
             --concurrency 6 \
             2>&1 | tee spa-pilot/results/execution.log
 
-          unset OPENAI_API_KEY CIPHERTEXT
-          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/spa-cipher.bin" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/spa-public.pem" "$RUNNER_TEMP/issue-body.md" "$RUNNER_TEMP/issue.json"
+          unset OPENAI_API_KEY
+          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/openai_key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/openai_key.enc.b64"
 
       - name: Validate result bundle
+        if: steps.handoff.outputs.owns_key == 'true'
         run: |
           set -euo pipefail
           test -s spa-pilot/results/report.md
@@ -187,9 +165,21 @@ jobs:
           PY
 
       - name: Commit source and results to experiment branch
+        if: steps.handoff.outputs.owns_key == 'true'
+        env:
+          BRANCH: ${{ github.head_ref || 'spa-pilot-gpt54mini-20260803' }}
         run: |
           set -euo pipefail
-          rm -rf spa-pilot/vendor
+          rm -rf "$RUNNER_TEMP/spa-results" "$RUNNER_TEMP/run_spa_pilot.py"
+          cp -a spa-pilot/results "$RUNNER_TEMP/spa-results"
+          cp spa-pilot/run_spa_pilot.py "$RUNNER_TEMP/run_spa_pilot.py"
+
+          git fetch -q origin "$BRANCH"
+          git reset --hard "origin/${BRANCH}"
+          rm -rf spa-pilot/results spa-pilot/vendor
+          cp -a "$RUNNER_TEMP/spa-results" spa-pilot/results
+          cp "$RUNNER_TEMP/run_spa_pilot.py" spa-pilot/run_spa_pilot.py
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add spa-pilot/run_spa_pilot.py spa-pilot/results
@@ -197,23 +187,24 @@ jobs:
             echo 'No result changes to commit.'
           else
             git commit -m 'Add SPA E1 pilot results [skip ci]'
-            git push origin HEAD:spa-pilot-gpt54mini-20260803
+            git push origin "HEAD:${BRANCH}"
           fi
 
-      - name: Close key-handoff issue with run status
+      - name: Upload result artifact
+        if: always() && steps.handoff.outputs.owns_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spa-e1-gpt54mini-results
+          path: |
+            spa-pilot/results/**
+            spa-pilot/run_spa_pilot.py
+            spa-pilot/README.md
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Destroy any remaining private material
         if: always()
         run: |
           set +e
-          if [ ! -f "$RUNNER_TEMP/spa-issue-number" ]; then
-            exit 0
-          fi
-          ISSUE_NUMBER="$(cat "$RUNNER_TEMP/spa-issue-number")"
-          if [ "${{ job.status }}" = success ]; then
-            BODY="SPA E1 pilot completed successfully. Results were committed to branch \`spa-pilot-gpt54mini-20260803\` under \`spa-pilot/results/\`. The ephemeral private key and plaintext API-key file were destroyed."
-          else
-            BODY="SPA E1 pilot did not complete successfully. Inspect the Actions job logs. The ephemeral runner is being destroyed; any private/plaintext key material is not persisted."
-          fi
-          jq -n --arg body "$BODY" '{body:$body}' > "$RUNNER_TEMP/status-comment.json"
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" --input "$RUNNER_TEMP/status-comment.json" >/dev/null
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" -f state=closed >/dev/null
-          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/spa-cipher.bin" 2>/dev/null || true
+          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/openai_key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/openai_key.enc.b64"
