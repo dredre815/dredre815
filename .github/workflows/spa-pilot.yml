@@ -64,6 +64,9 @@ jobs:
           git -C spa-pilot/vendor/TradingAgents fetch -q --depth=1 origin "$TA_COMMIT"
           git -C spa-pilot/vendor/TradingAgents checkout -q --detach FETCH_HEAD
           test "$(git -C spa-pilot/vendor/TradingAgents rev-parse HEAD)" = "$TA_COMMIT"
+          # Isolate the exact memory/rating modules without importing every analyst dependency.
+          : > spa-pilot/vendor/TradingAgents/tradingagents/agents/__init__.py
+          : > spa-pilot/vendor/TradingAgents/tradingagents/agents/utils/__init__.py
 
       - name: Generate ephemeral RSA public key
         id: handoff
