@@ -1,4 +1,4 @@
-name: R&D-SPA RD-Agent(Q) mechanism pilot
+name: R&D-SPA RD-Agent(Q) primary-dose resume
 
 on:
   pull_request:
@@ -9,16 +9,19 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  pilot:
+  resume:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 120
     env:
       BRANCH: ${{ github.head_ref }}
       RDAGENT_COMMIT: 4f9ecb005881cddc08df0124a2e894c018007679
       MODEL_SNAPSHOT: gpt-5.4-mini-2026-03-17
+      CHECKPOINT_ARTIFACT_ID: "8847552062"
+      CHECKPOINT_ZIP_SHA256: f074b36a7edf0ace6f2a748bb4eb7e931893b08530763de6d5ab0b8c7fcae831
       MPLBACKEND: Agg
 
     steps:
@@ -40,18 +43,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r rdspa/requirements.txt
 
-      - name: Reassemble and verify experiment source
+      - name: Reassemble and verify resume runner
         run: |
           set -euo pipefail
-          cat rdspa/payload_parts/part00 rdspa/payload_parts/part01 \
-              rdspa/payload_parts/part02 rdspa/payload_parts/part03 \
-              rdspa/payload_parts/part04 rdspa/payload_parts/part05 \
-              > "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64"
-          echo '97067d719de5ee4ce6f7f6623012db59a9c99eb9196439a8350d931cb9b25bd5  '"$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64" | sha256sum --check --strict
-          base64 --decode "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64" | gzip --decompress > rdspa/run_rdspa_pilot.py
-          python -m py_compile rdspa/run_rdspa_pilot.py
-          test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1463
-          echo '50d72b45056ac56cdc2851195914743d812043c53dbc9feb1b14253833e44c88  rdspa/run_rdspa_pilot.py' | sha256sum --check --strict
+          cat rdspa/resume_parts/part00 rdspa/resume_parts/part01 rdspa/resume_parts/part02 \
+            > "$RUNNER_TEMP/resume_rdspa.py.gz.b64"
+          echo '7c56b49023c6eb05256ff478994f6fb74f361df080ab664d285c486763c1fe03  '"$RUNNER_TEMP/resume_rdspa.py.gz.b64" | sha256sum --check --strict
+          base64 --decode "$RUNNER_TEMP/resume_rdspa.py.gz.b64" | gzip --decompress > rdspa/resume_rdspa.py
+          python -m py_compile rdspa/resume_rdspa.py
+          test "$(wc -l < rdspa/resume_rdspa.py)" -eq 456
+          echo '62b64da45482024d8c963c556a731f74f983eda0980d6b5e12ef013d932b19ba  rdspa/resume_rdspa.py' | sha256sum --check --strict
+
+      - name: Download and verify completed feedback checkpoint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CHECKPOINT_ARTIFACT_ID}/zip" \
+            -o "$RUNNER_TEMP/checkpoint.zip"
+          echo "${CHECKPOINT_ZIP_SHA256}  $RUNNER_TEMP/checkpoint.zip" | sha256sum --check --strict
+          rm -rf rdspa/checkpoint
+          mkdir -p rdspa/checkpoint
+          unzip -q "$RUNNER_TEMP/checkpoint.zip" -d rdspa/checkpoint
+          test "$(wc -l < rdspa/checkpoint/results/candidate_metrics.jsonl)" -eq 240
+          test "$(wc -l < rdspa/checkpoint/results/feedback_records.jsonl)" -eq 240
+          echo '50d72b45056ac56cdc2851195914743d812043c53dbc9feb1b14253833e44c88  rdspa/checkpoint/run_rdspa_pilot.py' | sha256sum --check --strict
 
       - name: Fetch pinned RD-Agent source
         run: |
@@ -71,16 +90,18 @@ jobs:
             exit 0
           fi
           umask 077
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$RUNNER_TEMP/rdspa-private.pem" >/dev/null 2>&1
-          openssl pkey -in "$RUNNER_TEMP/rdspa-private.pem" -pubout -out rdspa/handshake/public.pem >/dev/null 2>&1
-          git config user.name rdspa-runner
-          git config user.email rdspa-runner@users.noreply.github.com
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
+            -out "$RUNNER_TEMP/rdspa-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/rdspa-private.pem" -pubout \
+            -out rdspa/handshake/public.pem >/dev/null 2>&1
+          git config user.name rdspa-resume-runner
+          git config user.email rdspa-resume-runner@users.noreply.github.com
           git add rdspa/handshake/public.pem
-          git commit -m 'R&D-SPA: publish ephemeral encryption key'
+          git commit -m 'R&D-SPA resume: publish ephemeral encryption key'
           git push origin "HEAD:${BRANCH}"
           echo 'owns_key=true' >> "$GITHUB_OUTPUT"
 
-      - name: Decrypt credential and execute pilot
+      - name: Decrypt credential and execute primary-dose resume
         if: steps.owner.outputs.owns_key == 'true'
         run: |
           set -euo pipefail
@@ -88,7 +109,8 @@ jobs:
           found=0
           for _ in $(seq 1 240); do
             git fetch --quiet origin "$BRANCH"
-            if git show "origin/${BRANCH}:rdspa/handshake/openai_key.enc.b64" > "$RUNNER_TEMP/key.enc.b64" 2>/dev/null; then
+            if git show "origin/${BRANCH}:rdspa/handshake/openai_key.enc.b64" \
+              > "$RUNNER_TEMP/key.enc.b64" 2>/dev/null; then
               found=1
               break
             fi
@@ -96,59 +118,63 @@ jobs:
           done
           test "$found" = 1
           base64 --decode "$RUNNER_TEMP/key.enc.b64" > "$RUNNER_TEMP/key.enc"
-          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/rdspa-private.pem" -in "$RUNNER_TEMP/key.enc" \
-            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
-            > "$RUNNER_TEMP/openai.key"
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/rdspa-private.pem" -in "$RUNNER_TEMP/key.enc" \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256 > "$RUNNER_TEMP/openai.key"
           OPENAI_API_KEY="$(cat "$RUNNER_TEMP/openai.key")"
           case "$OPENAI_API_KEY" in sk-*) ;; *) exit 3 ;; esac
           echo "::add-mask::$OPENAI_API_KEY"
-          rm -rf rdspa/results
-          mkdir -p rdspa/results
-          OPENAI_API_KEY="$OPENAI_API_KEY" python rdspa/run_rdspa_pilot.py \
-            --vendor rdspa/vendor/RD-Agent --out rdspa/results \
-            --model "$MODEL_SNAPSHOT" --reasoning-effort low \
-            --replicates 5 --concurrency 8 2>&1 | tee rdspa/results/execution.log
+          rm -rf rdspa/resume_results
+          mkdir -p rdspa/resume_results
+          OPENAI_API_KEY="$OPENAI_API_KEY" python rdspa/resume_rdspa.py \
+            --checkpoint rdspa/checkpoint \
+            --vendor rdspa/vendor/RD-Agent \
+            --out rdspa/resume_results \
+            --model "$MODEL_SNAPSHOT" \
+            --reasoning-effort low \
+            --replicates 5 \
+            --concurrency 6 2>&1 | tee rdspa/resume_results/execution.log
           unset OPENAI_API_KEY
           shred -u "$RUNNER_TEMP/openai.key" "$RUNNER_TEMP/rdspa-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/key.enc.b64"
 
-      - name: Validate and commit results
+      - name: Validate and commit final results
         if: steps.owner.outputs.owns_key == 'true'
         run: |
           set -euo pipefail
-          test -s rdspa/results/report.md
-          test -s rdspa/results/summary.json
-          test -s rdspa/results/manifest.json
-          test -s rdspa/results/next_hypotheses.jsonl
-          test -s rdspa/results/feedback_records.jsonl
+          test -s rdspa/resume_results/report.md
+          test -s rdspa/resume_results/summary.json
+          test -s rdspa/resume_results/manifest.json
+          test "$(wc -l < rdspa/resume_results/next_hypotheses.jsonl)" -eq 60
           python - <<'PY'
           import json
           from pathlib import Path
-          s=json.loads(Path('rdspa/results/summary.json').read_text())
-          m=json.loads(Path('rdspa/results/manifest.json').read_text())
+          s=json.loads(Path('rdspa/resume_results/summary.json').read_text())
+          m=json.loads(Path('rdspa/resume_results/manifest.json').read_text())
           assert s['verdict'] in {'SUPPORTED','PARTIALLY SUPPORTED','NOT SUPPORTED'}
           assert m['model_used']=='gpt-5.4-mini-2026-03-17'
           assert m['rdagent_commit']=='4f9ecb005881cddc08df0124a2e894c018007679'
           assert m['usage']['total_tokens']>0
           print(json.dumps(s, indent=2))
           PY
-          git config user.name rdspa-runner
-          git config user.email rdspa-runner@users.noreply.github.com
+          git config user.name rdspa-resume-runner
+          git config user.email rdspa-resume-runner@users.noreply.github.com
           git pull --rebase origin "$BRANCH"
-          git add rdspa/run_rdspa_pilot.py rdspa/results
-          git commit -m 'R&D-SPA: record GPT-5.4-mini pilot results'
+          git add rdspa/resume_rdspa.py rdspa/resume_results
+          git commit -m 'R&D-SPA: record primary-dose GPT-5.4-mini results'
           git push origin "HEAD:${BRANCH}"
 
-      - name: Upload artifact
+      - name: Upload final artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rdspa-rdagent-gpt54mini-results
+          name: rdspa-rdagent-primary-dose-results
           path: |
-            rdspa/results/**
-            rdspa/run_rdspa_pilot.py
-            rdspa/README.md
+            rdspa/resume_results/**
+            rdspa/resume_rdspa.py
             rdspa/protocol.json
+            rdspa/README.md
           if-no-files-found: warn
           retention-days: 7
 
@@ -158,4 +184,4 @@ jobs:
           set +e
           unset OPENAI_API_KEY
           shred -u "$RUNNER_TEMP/openai.key" "$RUNNER_TEMP/rdspa-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/run_rdspa_pilot.py.gz.b64"
+          rm -f "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/checkpoint.zip" "$RUNNER_TEMP/resume_rdspa.py.gz.b64"
