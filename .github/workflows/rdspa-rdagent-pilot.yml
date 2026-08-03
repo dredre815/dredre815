@@ -47,8 +47,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '97067d719de5ee4ce6f7f6623012db59a9c99eb9196439a8350d931cb9b25bd5  rdspa/run_rdspa_pilot.py.gz.b64' | sha256sum --check --strict
-          base64 --decode rdspa/run_rdspa_pilot.py.gz.b64 | gzip --decompress > rdspa/run_rdspa_pilot.py
+          base64 --decode rdspa/run_rdspa_pilot.py.gz.b64 > "$RUNNER_TEMP/run_rdspa_pilot.py.gz"
+          echo '7d4ae5afc9b0c8371dc0bf553f07d2dc24c6977166c2fece014f67c6ced1e0ec  '"$RUNNER_TEMP/run_rdspa_pilot.py.gz" | sha256sum --check --strict
+          gzip --decompress --stdout "$RUNNER_TEMP/run_rdspa_pilot.py.gz" > rdspa/run_rdspa_pilot.py
           python -m py_compile rdspa/run_rdspa_pilot.py
           test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1463
           echo '50d72b45056ac56cdc2851195914743d812043c53dbc9feb1b14253833e44c88  rdspa/run_rdspa_pilot.py' | sha256sum --check --strict
@@ -143,7 +144,7 @@ jobs:
           shred -u "$RUNNER_TEMP/rdspa-openai.key" \
             "$RUNNER_TEMP/rdspa-private.pem" \
             "$RUNNER_TEMP/openai_key.enc" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/openai_key.enc.b64"
+          rm -f "$RUNNER_TEMP/openai_key.enc.b64" "$RUNNER_TEMP/run_rdspa_pilot.py.gz"
 
       - name: Validate result bundle
         if: steps.key_owner.outputs.owns_key == 'true'
@@ -200,5 +201,6 @@ jobs:
           unset OPENAI_API_KEY
           shred -u "$RUNNER_TEMP/rdspa-openai.key" \
             "$RUNNER_TEMP/rdspa-private.pem" \
-            "$RUNNER_TEMP/openai_key.enc" 2>/dev/null || true
+            "$RUNNER_TEMP/openai_key.enc" \
+            "$RUNNER_TEMP/run_rdspa_pilot.py.gz" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/openai_key.enc.b64"
