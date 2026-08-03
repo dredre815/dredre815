@@ -1,0 +1,54 @@
+{
+  "experiment_version": "spa-e1-mechanism-pilot-v1",
+  "started_unix": 1785735885.0832615,
+  "finished_unix": 1785736137.8777742,
+  "duration_s": 252.79451370239258,
+  "model_alias_requested": "gpt-5.4-mini",
+  "model_used": "gpt-5.4-mini-2026-03-17",
+  "reasoning_effort": "low",
+  "replicates": 5,
+  "concurrency": 6,
+  "doses": [
+    0,
+    1,
+    2,
+    3,
+    5,
+    8
+  ],
+  "conditions": [
+    "central_positive",
+    "peripheral_positive",
+    "central_negative",
+    "no_feature_positive"
+  ],
+  "scopes": [
+    "cross_ticker",
+    "same_ticker"
+  ],
+  "tradingagents_commit": "a33fd4c0f134485a43553a2c23a63cb14adbd88f",
+  "source_sha256": {
+    "reflection.py": "4386a66446cbe770e4d93c3928f2e501e8d4a44614dcc343625c54231e5ff37b",
+    "memory.py": "8401dacff141fd53f14e13d002f57f57f01943ab3a97ced8d14efb4b9fdbbbcd",
+    "portfolio_manager.py": "774c0bc3099d167ab1bf6034ab66d45f2f1ad6f0aca47dccdb9d1e4db1cc9bdd",
+    "schemas.py": "27274e6f5ab8a4ad5bdb3032feecf08f91951d4c29f62c1bf9879256b99002eb"
+  },
+  "python": "3.11.15 (main, Jun 16 2026, 21:41:52) [GCC 13.3.0]",
+  "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+  "openai_sdk": "2.52.0",
+  "numpy": "2.4.6",
+  "matplotlib": "3.11.1",
+  "usage": {
+    "input_tokens": 383082,
+    "output_tokens": 120995,
+    "total_tokens": 504077
+  },
+  "estimated_cost_usd": 0.8317890000000001,
+  "pricing_assumption": {
+    "input_per_million_usd": 0.75,
+    "output_per_million_usd": 4.5,
+    "cached_input_not_discounted": true
+  },
+  "api_error_records": 1,
+  "admission_conditioned": true
+}

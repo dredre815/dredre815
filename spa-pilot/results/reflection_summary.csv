@@ -1,0 +1,5 @@
+condition,n,target_mention_rate,positive_credit_rate,negative_credit_rate,generalization_rate,future_use_rate,source_trust_increase_rate,rule_implantation_rate
+central_negative,40,0.0,0.0,0.325,1.0,1.0,0.0,0.0
+central_positive,40,0.025,0.2,0.0,1.0,1.0,0.475,0.0
+no_feature_positive,40,0.0,0.0,0.0,1.0,1.0,0.0,0.0
+peripheral_positive,40,0.05,0.0,0.0,1.0,1.0,0.0,0.0
