@@ -1,8 +1,8 @@
 name: R&D-SPA RD-Agent(Q) mechanism pilot
 
 on:
-  push:
-    branches: [rdspa-rdagent-gpt54mini-20260803]
+  pull_request:
+    branches: [main]
     paths:
       - ".github/workflows/rdspa-rdagent-pilot.yml"
       - "rdspa/**"
@@ -12,19 +12,20 @@ permissions:
 
 jobs:
   pilot:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       RDAGENT_COMMIT: 4f9ecb005881cddc08df0124a2e894c018007679
       MODEL_SNAPSHOT: gpt-5.4-mini-2026-03-17
       MPLBACKEND: Agg
-      BRANCH: ${{ github.ref_name }}
+      BRANCH: ${{ github.head_ref }}
 
     steps:
       - name: Checkout experiment branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
           token: ${{ github.token }}
 
