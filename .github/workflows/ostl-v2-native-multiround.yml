@@ -1,0 +1,264 @@
+name: OSTL v2 Native Multi-Round Quant R&D
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ostl-v2-native-multiround.yml"
+      - "ostl2/**"
+      - "!ostl2/handshake/**"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  experiment:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BRANCH: ${{ github.head_ref }}
+      RDAGENT_COMMIT: 4f9ecb005881cddc08df0124a2e894c018007679
+      QUANTA_COMMIT: b7ceb27b1001261d7a95b209a963664ae1f8ab23
+      QLIB_COMMIT: 79633dd9506ea689e5400dea0197717b5b3d74b7
+      MODEL: deepseek-v4-flash
+      RESULTS: ${{ github.workspace }}/ostl2/results
+      HF_DATA: ${{ github.workspace }}/ostl2/hf_data
+      PROVIDER_ROOT: ${{ github.workspace }}/ostl2/provider
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: Agg
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: ostl2/requirements.txt
+
+      - name: Install system and Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libhdf5-dev libgomp1 git unzip openssl
+          python -m pip install --upgrade pip wheel setuptools cython
+          python -m pip install -r ostl2/requirements.txt
+
+      - name: Reassemble and verify experiment source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ostl2/payload_parts/part00 > "$RUNNER_TEMP/run_native_multiround.py.gz.b64"
+          echo '22548b71fb5643cb854b79e37013f678e8b80d8e69c083e9139fa716e440da3f  '"$RUNNER_TEMP/run_native_multiround.py.gz.b64" | sha256sum --check --strict
+          base64 --decode "$RUNNER_TEMP/run_native_multiround.py.gz.b64" | gzip --decompress > ostl2/run_native_multiround.py
+          python -m py_compile ostl2/run_native_multiround.py
+          test "$(wc -l < ostl2/run_native_multiround.py)" -eq 2623
+          echo '82c7317195337866933aaf8f65867c42c0f69e41dfc59dbd3c74b5f3d4dc523b  ostl2/run_native_multiround.py' | sha256sum --check --strict
+          python - <<'PY'
+          import json
+          p=json.load(open('ostl2/protocol.json'))
+          assert p['design']['paired_replicates']==30
+          assert p['design']['adaptive_rounds']==8
+          assert p['model']['model']=='deepseek-v4-flash'
+          print(json.dumps(p['design'], indent=2))
+          PY
+
+      - name: Fetch source-pinned victims and Qlib
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ostl2/vendor
+          mkdir -p ostl2/vendor
+          git clone --quiet --no-checkout https://github.com/microsoft/RD-Agent.git ostl2/vendor/RD-Agent
+          git -C ostl2/vendor/RD-Agent checkout --quiet "$RDAGENT_COMMIT"
+          test "$(git -C ostl2/vendor/RD-Agent rev-parse HEAD)" = "$RDAGENT_COMMIT"
+          git clone --quiet --no-checkout https://github.com/QuantaAlpha/QuantaAlpha.git ostl2/vendor/QuantaAlpha
+          git -C ostl2/vendor/QuantaAlpha checkout --quiet "$QUANTA_COMMIT"
+          test "$(git -C ostl2/vendor/QuantaAlpha rev-parse HEAD)" = "$QUANTA_COMMIT"
+          git clone --quiet --no-checkout https://github.com/microsoft/qlib.git ostl2/vendor/qlib
+          git -C ostl2/vendor/qlib checkout --quiet "$QLIB_COMMIT"
+          test "$(git -C ostl2/vendor/qlib rev-parse HEAD)" = "$QLIB_COMMIT"
+          python -m pip install -e ostl2/vendor/qlib
+
+      - name: Download official Qlib CSI300 provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$HF_DATA" "$PROVIDER_ROOT"
+          mkdir -p "$HF_DATA" "$PROVIDER_ROOT"
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          path=hf_hub_download(
+              repo_id='QuantaAlpha/qlib_csi300',
+              filename='cn_data.zip',
+              repo_type='dataset',
+              local_dir=os.environ['HF_DATA'],
+          )
+          print(path)
+          PY
+          unzip -q "$HF_DATA/cn_data.zip" -d "$PROVIDER_ROOT"
+          test -d "$PROVIDER_ROOT/cn_data"
+          find "$PROVIDER_ROOT/cn_data" -maxdepth 2 -type f | head
+
+      - name: Source and runtime self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'factor_feedback_generation' ostl2/vendor/RD-Agent/rdagent/scenarios/qlib/prompts.yaml
+          grep -q 'parent_selection_strategy: best' ostl2/vendor/QuantaAlpha/configs/experiment.yaml
+          grep -q 'orthogonal' ostl2/vendor/QuantaAlpha/quantaalpha/pipeline/prompts/evolution_prompts.yaml
+          python ostl2/run_native_multiround.py --help
+          python - <<'PY'
+          import qlib
+          from qlib.contrib.data.loader import Alpha158DL
+          fields,names=Alpha158DL.get_feature_config()
+          assert len(fields)==158 and len(names)==158
+          print('Alpha158 expressions:', len(fields))
+          PY
+
+      - name: Generate runner-bound RSA public key
+        id: owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ostl2/handshake
+          if test -f ostl2/handshake/public.pem; then
+            echo 'owns_key=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
+            -out "$RUNNER_TEMP/ostl2-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/ostl2-private.pem" -pubout \
+            -out ostl2/handshake/public.pem >/dev/null 2>&1
+          git config user.name ostl2-runner
+          git config user.email ostl2-runner@users.noreply.github.com
+          git add ostl2/handshake/public.pem
+          git commit -m 'OSTL v2: publish ephemeral encryption key'
+          git push origin "HEAD:${BRANCH}"
+          echo 'owns_key=true' >> "$GITHUB_OUTPUT"
+
+      - name: Decrypt one-time credential and run experiment
+        if: steps.owner.outputs.owns_key == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          found=0
+          for _ in $(seq 1 240); do
+            git fetch --quiet origin "$BRANCH"
+            if git show "origin/${BRANCH}:ostl2/handshake/deepseek_key.enc.b64" \
+              > "$RUNNER_TEMP/key.enc.b64" 2>/dev/null; then
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          test "$found" = 1
+          base64 --decode "$RUNNER_TEMP/key.enc.b64" > "$RUNNER_TEMP/key.enc"
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/ostl2-private.pem" \
+            -in "$RUNNER_TEMP/key.enc" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256 \
+            > "$RUNNER_TEMP/deepseek.key"
+          DEEPSEEK_API_KEY="$(cat "$RUNNER_TEMP/deepseek.key")"
+          case "$DEEPSEEK_API_KEY" in sk-*) ;; *) exit 3 ;; esac
+          echo "::add-mask::$DEEPSEEK_API_KEY"
+          rm -rf "$RESULTS"
+          mkdir -p "$RESULTS"
+          DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
+            python ostl2/run_native_multiround.py \
+              --provider "$PROVIDER_ROOT/cn_data" \
+              --rd-root ostl2/vendor/RD-Agent \
+              --quanta-root ostl2/vendor/QuantaAlpha \
+              --out "$RESULTS" \
+              --api-concurrency 96 \
+              --cell-concurrency 48 \
+              2>&1 | tee "$RESULTS/execution.log"
+          unset DEEPSEEK_API_KEY
+          shred -u "$RUNNER_TEMP/deepseek.key" "$RUNNER_TEMP/ostl2-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/key.enc.b64"
+
+      - name: Validate and commit compact results
+        if: steps.owner.outputs.owns_key == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RESULTS/report.md"
+          test -s "$RESULTS/summary.json"
+          test -s "$RESULTS/manifest.json"
+          test -s "$RESULTS/cell_results.jsonl"
+          test -s "$RESULTS/events.jsonl"
+          test -s "$RESULTS/expression_verification.jsonl"
+          test -s "$RESULTS/used_factor_packages.zip"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          r=Path(os.environ['RESULTS'])
+          s=json.loads((r/'summary.json').read_text())
+          m=json.loads((r/'manifest.json').read_text())
+          assert s['verdict'] in {'SUPPORTED','PARTIALLY SUPPORTED','NOT SUPPORTED'}
+          assert m['model']=='deepseek-v4-flash'
+          assert m['cell_count']==480
+          assert m['expected_model_calls']==9600
+          assert m['expression_verification']['all_executable'] is True
+          assert m['usage']['total_tokens']>0
+          assert len((r/'cell_results.jsonl').read_text().splitlines())==480
+          print(json.dumps({
+              'verdict':s['verdict'],
+              'usage':m['usage'],
+              'estimated_cost_usd':m['estimated_cost_usd'],
+              'expression_verification':m['expression_verification'],
+          }, indent=2))
+          PY
+          git config user.name ostl2-runner
+          git config user.email ostl2-runner@users.noreply.github.com
+          git pull --rebase origin "$BRANCH"
+          mkdir -p ostl2/compact_results
+          cp "$RESULTS/report.md" ostl2/compact_results/
+          cp "$RESULTS/summary.json" ostl2/compact_results/
+          cp "$RESULTS/manifest.json" ostl2/compact_results/
+          cp "$RESULTS/condition_summary.csv" ostl2/compact_results/
+          cp "$RESULTS/family_summary.csv" ostl2/compact_results/
+          cp "$RESULTS/paired_contrasts.csv" ostl2/compact_results/
+          cp "$RESULTS"/*.png ostl2/compact_results/
+          git add ostl2/run_native_multiround.py ostl2/compact_results
+          git commit -m 'OSTL v2: record DeepSeek multi-round results'
+          git push origin "HEAD:${BRANCH}"
+
+      - name: Upload complete experiment artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ostl-v2-native-multiround-deepseek-results
+          path: |
+            ostl2/results/**
+            ostl2/run_native_multiround.py
+            ostl2/protocol.json
+            ostl2/README.md
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
+      - name: Destroy remaining private material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          unset DEEPSEEK_API_KEY
+          shred -u "$RUNNER_TEMP/deepseek.key" "$RUNNER_TEMP/ostl2-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/run_native_multiround.py.gz.b64"
