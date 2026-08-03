@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           base64 --decode rdspa/run_rdspa_pilot.py.gz.b64 > "$RUNNER_TEMP/run_rdspa_pilot.py.gz"
-          echo '7d4ae5afc9b0c8371dc0bf553f07d2dc24c6977166c2fece014f67c6ced1e0ec  '"$RUNNER_TEMP/run_rdspa_pilot.py.gz" | sha256sum --check --strict
+          echo '4747c5b3c0298b8cd8d9c1329524eeee11533a0568a124293a4ea300903bad81  '"$RUNNER_TEMP/run_rdspa_pilot.py.gz" | sha256sum --check --strict
           gzip --decompress --stdout "$RUNNER_TEMP/run_rdspa_pilot.py.gz" > rdspa/run_rdspa_pilot.py
           python -m py_compile rdspa/run_rdspa_pilot.py
           test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1463
