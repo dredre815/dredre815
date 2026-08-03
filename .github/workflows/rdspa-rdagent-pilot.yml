@@ -46,11 +46,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '64b58fe4486e38663cefd84ea5adb7fcd6a6e4fc23889389ddaa9385c3d0a887  rdspa/run_rdspa_pilot.py.gz.b64' | sha256sum --check --strict
+          echo '97067d719de5ee4ce6f7f6623012db59a9c99eb9196439a8350d931cb9b25bd5  rdspa/run_rdspa_pilot.py.gz.b64' | sha256sum --check --strict
           base64 --decode rdspa/run_rdspa_pilot.py.gz.b64 | gzip --decompress > rdspa/run_rdspa_pilot.py
           python -m py_compile rdspa/run_rdspa_pilot.py
-          test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1385
-          echo '9b2561bf6a1c08f960c9b340426b7822c1c4db3e76d7545f5a74f4a4562dbb6c  rdspa/run_rdspa_pilot.py' | sha256sum --check --strict
+          test "$(wc -l < rdspa/run_rdspa_pilot.py)" -eq 1463
+          echo '50d72b45056ac56cdc2851195914743d812043c53dbc9feb1b14253833e44c88  rdspa/run_rdspa_pilot.py' | sha256sum --check --strict
 
       - name: Fetch pinned RD-Agent source
         shell: bash
