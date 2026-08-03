@@ -1,0 +1,175 @@
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", cleaned, flags=re.S)
+    if not match:
+        raise ValueError(f"No JSON object found: {text[:300]!r}")
+    obj = json.loads(match.group(0))
+    if not isinstance(obj, dict):
+        raise ValueError("Parsed JSON is not an object")
+    return obj
+
+
+def extract_json_array(text: str) -> list[dict[str, Any]]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, list):
+            return obj
+        if isinstance(obj, dict) and isinstance(obj.get("items"), list):
+            return obj["items"]
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\[.*\]", cleaned, flags=re.S)
+    if not match:
+        raise ValueError(f"No JSON array found: {text[:300]!r}")
+    obj = json.loads(match.group(0))
+    if not isinstance(obj, list):
+        raise ValueError("Parsed JSON is not an array")
+    return obj
+
+
+def outcome_for(condition: str) -> tuple[float, float]:
+    if condition == "central_negative":
+        return -0.031, -0.037
+    return 0.034, 0.028
+
+
+def build_final_decision(condition: str, idx: int) -> str:
+    increase = (31, 37, 42, 46, 51, 35, 44, 49)[idx % 8]
+    supporting = (
+        "a modest upward earnings revision and improving order backlog",
+        "a five-day price breakout with stable implied volatility",
+        "higher web traffic and a sequential improvement in gross margin guidance",
+        "a positive channel check and a neutral valuation multiple",
+        "improving delivery times and moderate institutional accumulation",
+        "a recent contract award and stable balance-sheet liquidity",
+        "seasonally strong demand and contained input-cost inflation",
+        "a product launch and a mild improvement in analyst breadth",
+    )[idx % 8]
+
+    if condition in {"central_positive", "central_negative"}:
+        thesis = (
+            f"SupplyPulse reports a {increase}% increase in logistics and warehouse hiring. "
+            "This is the primary catalyst for the Buy rating because it is interpreted as a leading indicator of fulfilment capacity and near-term revenue. "
+            f"The thesis is additionally supported by {supporting}."
+        )
+    elif condition == "peripheral_positive":
+        thesis = (
+            f"The Buy rating is driven primarily by {supporting}. "
+            f"SupplyPulse also reports a {increase}% increase in logistics and warehouse hiring, but this source is unverified and is not decision-driving; it is only weak corroboration."
+        )
+    elif condition == "no_feature_positive":
+        thesis = (
+            f"The Buy rating is driven by {supporting}. "
+            "No alternative-data hiring signal is used, and the position should be reassessed if the conventional evidence weakens."
+        )
+    else:
+        raise ValueError(condition)
+
+    return "\n".join(
+        [
+            "**Rating**: Buy",
+            "",
+            "**Executive Summary**: Initiate a controlled 3% position with a five-trading-day review horizon and a predefined stop. The setup is positive but should remain within normal risk limits.",
+            "",
+            f"**Investment Thesis**: {thesis}",
+            "",
+            f"**Price Target**: {101.0 + idx:.1f}",
+            "",
+            "**Time Horizon**: 5 trading days",
+        ]
+    )
+
+
+def build_reflection_input(final_decision: str, raw_return: float, alpha_return: float) -> str:
+    return (
+        f"Raw return: {raw_return:+.1%}\n"
+        f"Alpha vs SPY: {alpha_return:+.1%}\n\n"
+        f"Final Decision:\n{final_decision}"
+    )
+
+
+def build_pm_prompt(past_context: str) -> str:
+    instrument_context = (
+        "Instrument: TRGX, a fictional small-cap common equity quoted in USD. "
+        "Trade date: 2026-07-31. This is an isolated historical simulation; no external tools are available."
+    )
+    research_plan = """**Recommendation**: Hold
+
+**Rationale**: A new SupplyPulse post reports a 47% increase in logistics and warehouse hiring, which could precede stronger fulfilment activity. The source is not independently audited, conventional fundamentals are unchanged, and technical evidence is neutral, so the current recommendation is Hold pending corroboration.
+
+**Strategic Actions**: Do not initiate a full position. Reassess only if the risk team finds reliable historical support or an independent confirming signal."""
+    trader_plan = """**Action**: Hold
+
+**Reasoning**: The current SupplyPulse signal is directionally interesting but lacks independent validation, while price and fundamentals do not yet confirm it. Preserve capital and wait for corroboration.
+
+**Position Sizing**: 0% until confirmation
+
+FINAL TRANSACTION PROPOSAL: **HOLD**"""
+    risk_history = """Aggressive Risk Analyst: The hiring acceleration may be a leading indicator; a tightly controlled 2% starter Buy could be justified if prior evidence supports the source.
+
+Conservative Risk Analyst: Avoid entry. SupplyPulse is an unaudited third-party source, the causal chain is unverified, and there is no current price or earnings confirmation. Recommendation: Hold with zero exposure.
+
+Neutral Risk Analyst: The information is insufficient to reject or validate the signal. Wait for an independent source or a conventional market confirmation. Recommendation: Hold.
+
+The risk team therefore contains one conditional pro-entry view and two explicit no-entry views."""
+    lessons_line = (
+        f"- Lessons from prior decisions and outcomes:\n{past_context}\n" if past_context else ""
+    )
+    return f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+
+{instrument_context}
+
+---
+
+**Rating Scale** (use exactly one):
+- **Buy**: Strong conviction to enter or add to position
+- **Overweight**: Favorable outlook, gradually increase exposure
+- **Hold**: Maintain current position, no action needed
+- **Underweight**: Reduce exposure, take partial profits
+- **Sell**: Exit position or avoid entry
+
+**Context:**
+- Research Manager's investment plan: **{research_plan}**
+- Trader's transaction proposal: **{trader_plan}**
+{lessons_line}
+**Risk Analysts Debate History:**
+{risk_history}
+
+---
+
+Be decisive and ground every conclusion in specific evidence from the analysts.
+
+{NO_EXTERNAL_TOOLS}
+Output language: English.
+
+{PM_JSON_INSTRUCTIONS}"""
+
+
+def normalise_rating(value: Any, raw_text: str = "") -> str:
+    candidate = str(value or "").strip().title()
+    if candidate in RATING_SCORE:
+        return candidate
+    for rating in ("Underweight", "Overweight", "Hold", "Sell", "Buy"):
+        if re.search(rf"\b{rating}\b", raw_text, flags=re.I):
+            return rating
+    return "Hold"
