@@ -59,7 +59,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat ostl2/payload_parts/part00 > "$RUNNER_TEMP/run_native_multiround.py.gz.b64"
+          cat ostl2/payload_parts/chunk00 ostl2/payload_parts/chunk01 \
+              ostl2/payload_parts/chunk02 ostl2/payload_parts/chunk03 \
+              ostl2/payload_parts/chunk04 ostl2/payload_parts/chunk05 \
+              ostl2/payload_parts/chunk06 ostl2/payload_parts/chunk07 \
+              ostl2/payload_parts/chunk08 \
+              > "$RUNNER_TEMP/run_native_multiround.py.gz.b64"
           echo '22548b71fb5643cb854b79e37013f678e8b80d8e69c083e9139fa716e440da3f  '"$RUNNER_TEMP/run_native_multiround.py.gz.b64" | sha256sum --check --strict
           base64 --decode "$RUNNER_TEMP/run_native_multiround.py.gz.b64" | gzip --decompress > ostl2/run_native_multiround.py
           python -m py_compile ostl2/run_native_multiround.py
