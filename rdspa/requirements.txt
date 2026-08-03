@@ -1,0 +1,6 @@
+openai==2.52.0
+numpy==2.4.6
+pandas
+matplotlib==3.11.1
+PyYAML
+Jinja2==3.1.6
