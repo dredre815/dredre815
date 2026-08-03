@@ -1,0 +1,243 @@
+name: OSTL Cross-Architecture Quant R&D Experiment
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ostl-crossarch.yml"
+      - "ostl/**"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  experiment:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BRANCH: ${{ github.head_ref }}
+      RDAGENT_COMMIT: 4f9ecb005881cddc08df0124a2e894c018007679
+      QUANTA_COMMIT: b7ceb27b1001261d7a95b209a963664ae1f8ab23
+      MODEL_SNAPSHOT: gpt-5.4-mini-2026-03-17
+      SCORE_ARTIFACT_ID: "8833396632"
+      SCORE_ZIP_SHA256: 6389dcd6cb8388be603ff42fb379d227e5e76de5023507ba1b9d347e160ba23d
+      MPLBACKEND: Agg
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ostl/requirements.txt
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r ostl/requirements.txt
+
+      - name: Reassemble and verify experiment source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ostl/payload_parts/part00 ostl/payload_parts/part01 \
+              ostl/payload_parts/part02 ostl/payload_parts/part03 \
+              > "$RUNNER_TEMP/run_crossarch.py.gz.b64"
+          echo '8bfed60b88fe3246b2c1c8a734d7405749b3ba0bc827214b650a43a7c51985c7  '"$RUNNER_TEMP/run_crossarch.py.gz.b64" | sha256sum --check --strict
+          base64 --decode "$RUNNER_TEMP/run_crossarch.py.gz.b64" | gzip --decompress > ostl/run_crossarch.py
+          python -m py_compile ostl/run_crossarch.py
+          test "$(wc -l < ostl/run_crossarch.py)" -eq 1601
+          echo '6bf9e15ae3e5594ff453683e48a83333566438ade0dae96d008948a21f580e9c  ostl/run_crossarch.py' | sha256sum --check --strict
+
+      - name: Fetch pinned victim sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ostl/vendor
+          mkdir -p ostl/vendor
+          git clone --quiet --no-checkout https://github.com/microsoft/RD-Agent.git ostl/vendor/RD-Agent
+          git -C ostl/vendor/RD-Agent checkout --quiet "$RDAGENT_COMMIT"
+          test "$(git -C ostl/vendor/RD-Agent rev-parse HEAD)" = "$RDAGENT_COMMIT"
+          git clone --quiet --no-checkout https://github.com/QuantaAlpha/QuantaAlpha.git ostl/vendor/QuantaAlpha
+          git -C ostl/vendor/QuantaAlpha checkout --quiet "$QUANTA_COMMIT"
+          test "$(git -C ostl/vendor/QuantaAlpha rev-parse HEAD)" = "$QUANTA_COMMIT"
+
+      - name: Download and verify official Alpha158 score substrate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf ostl/data
+          mkdir -p ostl/data
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SCORE_ARTIFACT_ID}/zip" \
+            -o "$RUNNER_TEMP/score-artifact.zip"
+          echo "${SCORE_ZIP_SHA256}  $RUNNER_TEMP/score-artifact.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/score-artifact.zip" -d ostl/data
+          test -s ostl/data/official_alpha158_scores.csv
+          test "$(($(wc -l < ostl/data/official_alpha158_scores.csv)-1))" -eq 158
+
+      - name: Source-native prompt and topology self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util, sys
+          from pathlib import Path
+          p=Path('ostl/run_crossarch.py')
+          spec=importlib.util.spec_from_file_location('ostl_crossarch', p)
+          m=importlib.util.module_from_spec(spec); sys.modules['ostl_crossarch']=m; spec.loader.exec_module(m)
+          table=m.prepare_score_table(Path('ostl/data/official_alpha158_scores.csv'))
+          assert len(table)==158
+          assert (table.family=='liquidity_pulse').sum()==40
+          adapters=m.PromptAdapters(Path('ostl/vendor/RD-Agent'), Path('ostl/vendor/QuantaAlpha'))
+          bundles=m.build_replicate_bundles(table,0)
+          backgrounds=m.background_artifacts(table,0)
+          for victim in ('rdagent','quantaalpha'):
+              for condition in m.CONDITIONS:
+                  system,user=adapters.feedback_prompts(victim,bundles[condition][0],condition)
+                  assert len(system)>200 and len(user)>100
+          trajectories=[m.trajectory_dict(a,None,'selected_family',i) for i,a in enumerate(bundles['selected_family'])]
+          trajectories += [m.trajectory_dict(a,None,'background_control',100+i) for i,a in enumerate(backgrounds)]
+          groups=m.exact_quanta_parent_groups(trajectories)
+          assert len(groups)==2 and all(len(g)==2 for g in groups)
+          ms,mu=adapters.mutation_prompts(trajectories[0]); cs,cu=adapters.crossover_prompts(groups[0])
+          assert len(ms)>100 and len(mu)>100 and len(cs)>100 and len(cu)>100
+          print({'prompt_rendering':'ok','parent_groups':[[p['artifact'].display_name for p in g] for g in groups]})
+          PY
+
+      - name: Generate runner-bound RSA public key
+        id: owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ostl/handshake
+          if test -f ostl/handshake/public.pem; then
+            echo 'A prior runner owns the matching private key; this follow-up run exits.'
+            echo 'owns_key=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
+            -out "$RUNNER_TEMP/ostl-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/ostl-private.pem" -pubout \
+            -out ostl/handshake/public.pem >/dev/null 2>&1
+          git config user.name ostl-runner
+          git config user.email ostl-runner@users.noreply.github.com
+          git add ostl/handshake/public.pem
+          git commit -m 'OSTL: publish ephemeral encryption key'
+          git push origin "HEAD:${BRANCH}"
+          echo 'owns_key=true' >> "$GITHUB_OUTPUT"
+
+      - name: Decrypt credential and run cross-architecture experiment
+        if: steps.owner.outputs.owns_key == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          found=0
+          for _ in $(seq 1 360); do
+            git fetch --quiet origin "$BRANCH"
+            if git show "origin/${BRANCH}:ostl/handshake/openai_key.enc.b64" \
+              > "$RUNNER_TEMP/key.enc.b64" 2>/dev/null; then
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          test "$found" = 1
+          base64 --decode "$RUNNER_TEMP/key.enc.b64" > "$RUNNER_TEMP/key.enc"
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/ostl-private.pem" -in "$RUNNER_TEMP/key.enc" \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256 > "$RUNNER_TEMP/openai.key"
+          OPENAI_API_KEY="$(cat "$RUNNER_TEMP/openai.key")"
+          case "$OPENAI_API_KEY" in sk-*) ;; *) echo 'Invalid decrypted credential' >&2; exit 3 ;; esac
+          echo "::add-mask::$OPENAI_API_KEY"
+          rm -rf ostl/results
+          mkdir -p ostl/results
+          OPENAI_API_KEY="$OPENAI_API_KEY" python ostl/run_crossarch.py \
+            --score-csv ostl/data/official_alpha158_scores.csv \
+            --rd-root ostl/vendor/RD-Agent \
+            --quanta-root ostl/vendor/QuantaAlpha \
+            --out ostl/results \
+            --model "$MODEL_SNAPSHOT" \
+            --reasoning-effort low \
+            --replicates 15 \
+            --concurrency 18 \
+            2>&1 | tee ostl/results/execution.log
+          unset OPENAI_API_KEY
+          shred -u "$RUNNER_TEMP/openai.key" "$RUNNER_TEMP/ostl-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/key.enc.b64"
+
+      - name: Validate and commit final results
+        if: steps.owner.outputs.owns_key == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s ostl/results/report.md
+          test -s ostl/results/summary.json
+          test -s ostl/results/manifest.json
+          test -s ostl/results/summary.csv
+          test -s ostl/results/next_outputs.jsonl
+          test -s ostl/results/feedback_records.jsonl
+          python - <<'PY'
+          import json, re
+          from pathlib import Path
+          m=json.loads(Path('ostl/results/manifest.json').read_text())
+          s=json.loads(Path('ostl/results/summary.json').read_text())
+          assert m['model_used']=='gpt-5.4-mini-2026-03-17'
+          assert m['rdagent_commit']=='4f9ecb005881cddc08df0124a2e894c018007679'
+          assert m['quantaalpha_commit']=='b7ceb27b1001261d7a95b209a963664ae1f8ab23'
+          assert m['record_counts']=={'artifacts':600,'feedback':1125,'outputs':750,'parent_selection':150}
+          assert m['usage']['total_tokens']>0
+          assert s['verdict'] in {'SUPPORTED','PARTIALLY SUPPORTED','NOT SUPPORTED'}
+          for path in Path('ostl/results').glob('*'):
+              if path.is_file() and path.stat().st_size < 20_000_000:
+                  assert not re.search(r'sk-proj-[A-Za-z0-9_-]{20,}', path.read_text(errors='ignore'))
+          print(json.dumps({'verdict':s['verdict'],'records':m['record_counts'],'usage':m['usage']},indent=2))
+          PY
+          rm -rf ostl/vendor ostl/data
+          git config user.name ostl-runner
+          git config user.email ostl-runner@users.noreply.github.com
+          git pull --rebase origin "$BRANCH"
+          git add ostl/run_crossarch.py ostl/results
+          git commit -m 'OSTL: record cross-architecture GPT-5.4-mini results'
+          git push origin "HEAD:${BRANCH}"
+
+      - name: Upload experiment artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ostl-crossarch-gpt54mini-results
+          path: |
+            ostl/results/**
+            ostl/run_crossarch.py
+            ostl/protocol.json
+            ostl/README.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Destroy any remaining private material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          unset OPENAI_API_KEY
+          shred -u "$RUNNER_TEMP/openai.key" "$RUNNER_TEMP/ostl-private.pem" "$RUNNER_TEMP/key.enc" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/key.enc.b64" "$RUNNER_TEMP/score-artifact.zip" "$RUNNER_TEMP/run_crossarch.py.gz.b64"
