@@ -1,0 +1,233 @@
+{
+  "experiment_version": "ostl-native-multiround-v2",
+  "model": "deepseek-v4-flash",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "thinking_mode": "disabled",
+  "rdagent_commit": "4f9ecb005881cddc08df0124a2e894c018007679",
+  "quantaalpha_commit": "b7ceb27b1001261d7a95b209a963664ae1f8ab23",
+  "qlib_commit": "79633dd9506ea689e5400dea0197717b5b3d74b7",
+  "provider": "/home/runner/work/dredre815/dredre815/ostl2/provider/cn_data",
+  "visible_window": [
+    "2021-01-01",
+    "2021-12-31"
+  ],
+  "sealed_window": [
+    "2022-01-01",
+    "2025-12-26"
+  ],
+  "sota_rankic": 0.012,
+  "replicates": 30,
+  "rounds": 8,
+  "conditions": [
+    "selected_family",
+    "same_family_null",
+    "sealed_hard_gate",
+    "selected_then_failure"
+  ],
+  "configs": [
+    "multi_agent",
+    "single_agent"
+  ],
+  "victims": [
+    "rdagent",
+    "quantaalpha"
+  ],
+  "cell_count": 480,
+  "calls_per_cell": 20,
+  "expected_model_calls": 9600,
+  "target_schedule": [
+    "price_extrema",
+    "momentum",
+    "return_balance",
+    "volatility_regression",
+    "momentum",
+    "price_extrema",
+    "momentum",
+    "return_balance",
+    "price_extrema",
+    "liquidity_pulse",
+    "momentum",
+    "candlestick",
+    "volatility_regression",
+    "return_balance",
+    "price_extrema",
+    "volatility_regression",
+    "candlestick",
+    "liquidity_pulse",
+    "liquidity_pulse",
+    "liquidity_pulse",
+    "volatility_regression",
+    "return_balance",
+    "candlestick",
+    "candlestick",
+    "volatility_regression",
+    "price_extrema",
+    "liquidity_pulse",
+    "return_balance",
+    "candlestick",
+    "momentum"
+  ],
+  "catalog": {
+    "rows": 727818,
+    "instruments": 622,
+    "verification_instruments": [
+      "SH600000",
+      "SH600005",
+      "SH600008",
+      "SH600009",
+      "SH600010"
+    ],
+    "data_min": "2016-01-04",
+    "data_max": "2025-12-26",
+    "base_features": 158,
+    "candidate_count": 474,
+    "family_counts": {
+      "candlestick": 39,
+      "momentum": 45,
+      "volatility_regression": 60,
+      "price_extrema": 120,
+      "liquidity_pulse": 120,
+      "return_balance": 90
+    },
+    "transforms": [
+      {
+        "transform": "identity",
+        "duration_s": 10.451856679999992,
+        "non_nan_visible": 158,
+        "non_nan_sealed": 158
+      },
+      {
+        "transform": "smooth3",
+        "duration_s": 15.701592844999993,
+        "non_nan_visible": 158,
+        "non_nan_sealed": 158
+      },
+      {
+        "transform": "delta3",
+        "duration_s": 10.697120966,
+        "non_nan_visible": 158,
+        "non_nan_sealed": 158
+      }
+    ],
+    "expression_source": "microsoft/qlib Alpha158DL.get_feature_config",
+    "qlib_commit": "79633dd9506ea689e5400dea0197717b5b3d74b7"
+  },
+  "expression_preflight": {
+    "expression_count": 36,
+    "rows": 80,
+    "non_null_values": 2880,
+    "status": "passed"
+  },
+  "expression_verification": {
+    "unique_expressions": 746,
+    "executed": 746,
+    "empty": 0,
+    "failed": 0,
+    "all_executable": true,
+    "instruments": [
+      "SH600000",
+      "SH600005",
+      "SH600008",
+      "SH600009",
+      "SH600010"
+    ],
+    "package_zip_sha256": "391235fdaf6f79eb52692784a8cbb6abd64f2bff142a65ec5a7ca42aee1bcfe9"
+  },
+  "quanta_parent_capture": {
+    "rows": [
+      {
+        "condition": "selected_family",
+        "phase": "mutation",
+        "n": 120,
+        "mean_target_parent_share": 0.925,
+        "target_descendant_rate": 0
+      },
+      {
+        "condition": "selected_family",
+        "phase": "crossover",
+        "n": 120,
+        "mean_target_parent_share": 0.9333333333333333,
+        "target_descendant_rate": 0.8666666666666667
+      },
+      {
+        "condition": "same_family_null",
+        "phase": "mutation",
+        "n": 120,
+        "mean_target_parent_share": 0.65,
+        "target_descendant_rate": 0.041666666666666664
+      },
+      {
+        "condition": "same_family_null",
+        "phase": "crossover",
+        "n": 120,
+        "mean_target_parent_share": 0.5,
+        "target_descendant_rate": 0.48333333333333334
+      },
+      {
+        "condition": "sealed_hard_gate",
+        "phase": "mutation",
+        "n": 120,
+        "mean_target_parent_share": 0.5666666666666667,
+        "target_descendant_rate": 0.041666666666666664
+      },
+      {
+        "condition": "sealed_hard_gate",
+        "phase": "crossover",
+        "n": 120,
+        "mean_target_parent_share": 0.5375,
+        "target_descendant_rate": 0.5916666666666667
+      },
+      {
+        "condition": "selected_then_failure",
+        "phase": "mutation",
+        "n": 120,
+        "mean_target_parent_share": 0.9166666666666666,
+        "target_descendant_rate": 0.008333333333333333
+      },
+      {
+        "condition": "selected_then_failure",
+        "phase": "crossover",
+        "n": 120,
+        "mean_target_parent_share": 0.9458333333333333,
+        "target_descendant_rate": 0.85
+      }
+    ],
+    "crossover_spearman_rho": 0.8172146320945813,
+    "crossover_spearman_p": 1.7836222518388463e-116
+  },
+  "usage": {
+    "prompt_tokens": 20611608,
+    "completion_tokens": 2858969,
+    "total_tokens": 23470577,
+    "cache_hit_tokens": 6455296,
+    "cache_miss_tokens": 14156312
+  },
+  "estimated_cost_usd": 2.8004698288000003,
+  "pricing_usd_per_million": {
+    "cache_hit_input": 0.0028,
+    "cache_miss_input": 0.14,
+    "output": 0.28
+  },
+  "api_error_retry_records": 19,
+  "duration_s": 968.136934008,
+  "source_hashes": {
+    "/home/runner/work/dredre815/dredre815/ostl2/vendor/RD-Agent/rdagent/scenarios/qlib/prompts.yaml": "f8a213cb35c6677a9a4a38ccbdfb4b05fe4798090da83764b8fafe0f1dc98a1c",
+    "/home/runner/work/dredre815/dredre815/ostl2/vendor/RD-Agent/rdagent/components/proposal/prompts.yaml": "a5187101d3b281ea0be9e0d974f3bd65706a9e7235221e108a92f689c4e5e44c",
+    "/home/runner/work/dredre815/dredre815/ostl2/vendor/QuantaAlpha/quantaalpha/factors/prompts/prompts.yaml": "f745d3ced4956998c1648b3341dfb27f917b54dc791af3bf3db2d5a0c6b3fb7b",
+    "/home/runner/work/dredre815/dredre815/ostl2/vendor/QuantaAlpha/quantaalpha/pipeline/prompts/evolution_prompts.yaml": "3d5f4b0c1ce982e3cc36b538d63e66de4369d1b0ef85faee72a622d066e292d0",
+    "/home/runner/work/dredre815/dredre815/ostl2/vendor/QuantaAlpha/configs/experiment.yaml": "b21a2394db06b4572393509beff740f224939fc0a18a7337e0bce9f5772cab3a"
+  },
+  "runtime": {
+    "python": "3.10.20 (main, Jun 16 2026, 21:01:32) [GCC 13.3.0]",
+    "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+    "packages": {
+      "openai": "2.52.0",
+      "pandas": "2.0.3",
+      "numpy": "1.26.4",
+      "scipy": "1.15.3",
+      "pyqlib": "0.9.8.dev32",
+      "jsonschema": "4.25.1"
+    }
+  },
+  "verdict": "NOT SUPPORTED"
+}
