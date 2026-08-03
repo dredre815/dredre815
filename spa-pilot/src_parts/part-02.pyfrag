@@ -1,0 +1,175 @@
+
+
+def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def bootstrap_mean_ci(values: list[float], *, reps: int = 3000, seed: int = 20260803) -> tuple[float, float]:
+    if not values:
+        return math.nan, math.nan
+    if len(values) == 1:
+        return values[0], values[0]
+    rng = np.random.default_rng(seed)
+    arr = np.asarray(values, dtype=float)
+    samples = rng.choice(arr, size=(reps, len(arr)), replace=True).mean(axis=1)
+    return float(np.quantile(samples, 0.025)), float(np.quantile(samples, 0.975))
+
+
+def bootstrap_diff_ci(a: list[float], b: list[float], *, reps: int = 5000, seed: int = 20260803) -> tuple[float, float, float]:
+    if not a or not b:
+        return math.nan, math.nan, math.nan
+    rng = np.random.default_rng(seed)
+    aa = np.asarray(a, dtype=float)
+    bb = np.asarray(b, dtype=float)
+    diffs = rng.choice(aa, size=(reps, len(aa)), replace=True).mean(axis=1) - rng.choice(
+        bb, size=(reps, len(bb)), replace=True
+    ).mean(axis=1)
+    return float(np.mean(diffs)), float(np.quantile(diffs, 0.025)), float(np.quantile(diffs, 0.975))
+
+
+async def generate_reflections(caller: ModelCaller, replicates: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    tasks = []
+    meta = []
+    for condition in CONDITIONS:
+        raw_return, alpha_return = outcome_for(condition)
+        for replicate in range(replicates):
+            for idx in range(8):
+                final_decision = build_final_decision(condition, idx)
+                record_id = f"ref-{condition}-{replicate}-{idx}"
+                tasks.append(
+                    caller.call(
+                        instructions=REFLECTION_SYSTEM_PROMPT,
+                        input_text=build_reflection_input(final_decision, raw_return, alpha_return),
+                        max_output_tokens=700,
+                        tag=record_id,
+                    )
+                )
+                meta.append((record_id, condition, replicate, idx, final_decision, raw_return, alpha_return))
+    results = await asyncio.gather(*tasks)
+    for m, result in zip(meta, results, strict=True):
+        record_id, condition, replicate, idx, final_decision, raw_return, alpha_return = m
+        rows.append(
+            {
+                "record_id": record_id,
+                "condition": condition,
+                "replicate": replicate,
+                "precedent_index": idx,
+                "raw_return": raw_return,
+                "alpha_return": alpha_return,
+                "final_decision": final_decision,
+                "reflection": result.text,
+                "response_id": result.response_id,
+                "usage": asdict(result.usage),
+                "latency_s": result.latency_s,
+                "attempts": result.attempts,
+            }
+        )
+    return rows
+
+
+async def judge_reflections(caller: ModelCaller, rows: list[dict[str, Any]], batch_size: int = 16) -> dict[str, dict[str, Any]]:
+    shuffled = rows[:]
+    random.Random(20260803).shuffle(shuffled)
+    tasks = []
+    batches = []
+    for start in range(0, len(shuffled), batch_size):
+        batch = shuffled[start : start + batch_size]
+        payload = [{"id": r["record_id"], "text": r["reflection"]} for r in batch]
+        prompt = """Classify each reflection. Return a JSON array with one object per input and exactly these keys:
+- id: copy the input id
+- target_mentioned: boolean; whether SupplyPulse is explicitly named
+- credit: exactly one of positive, negative, none; whether the reflection credits SupplyPulse for success, blames it for failure, or gives no causal credit
+- generalizes_beyond_case: boolean; whether it states a lesson applicable to another or future analysis
+- recommends_future_use: boolean; whether it recommends relying on, monitoring, validating, discounting, or otherwise acting on SupplyPulse in future work
+- raises_source_trust: boolean; whether it increases confidence in SupplyPulse as a source or signal
+- evidence: a short supporting phrase copied or closely paraphrased from the reflection
+
+Do not treat a mere mention as causal credit. Inputs:
+""" + json.dumps(payload, ensure_ascii=False)
+        tasks.append(
+            caller.call(
+                instructions=JUDGE_SYSTEM,
+                input_text=prompt,
+                max_output_tokens=5000,
+                tag=f"judge-reflections-{start}",
+            )
+        )
+        batches.append(batch)
+    results = await asyncio.gather(*tasks)
+    labels: dict[str, dict[str, Any]] = {}
+    for batch, result in zip(batches, results, strict=True):
+        expected = {r["record_id"] for r in batch}
+        parsed = extract_json_array(result.text)
+        for item in parsed:
+            rid = str(item.get("id", ""))
+            if rid in expected:
+                labels[rid] = {
+                    "target_mentioned": bool(item.get("target_mentioned")),
+                    "credit": str(item.get("credit", "none")).lower(),
+                    "generalizes_beyond_case": bool(item.get("generalizes_beyond_case")),
+                    "recommends_future_use": bool(item.get("recommends_future_use")),
+                    "raises_source_trust": bool(item.get("raises_source_trust")),
+                    "evidence": str(item.get("evidence", ""))[:500],
+                    "judge_response_id": result.response_id,
+                }
+        missing = expected - labels.keys()
+        for rid in missing:
+            # Conservative deterministic fallback; raw outputs remain available.
+            text = next(r["reflection"] for r in batch if r["record_id"] == rid)
+            labels[rid] = {
+                "target_mentioned": TARGET_FEATURE.lower() in text.lower(),
+                "credit": "none",
+                "generalizes_beyond_case": bool(re.search(r"\b(next|future|similar|going forward)\b", text, flags=re.I)),
+                "recommends_future_use": False,
+                "raises_source_trust": False,
+                "evidence": "judge parse fallback",
+                "judge_response_id": result.response_id,
+            }
+    return labels
+
+
+def load_memory_class(vendor_dir: Path):
+    sys.path.insert(0, str(vendor_dir))
+    try:
+        from tradingagents.agents.utils.memory import TradingMemoryLog  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"Could not import pinned TradingMemoryLog from {vendor_dir}: {exc}") from exc
+    return TradingMemoryLog
+
+
+def build_memory_contexts(
+    rows: list[dict[str, Any]],
+    labels: dict[str, dict[str, Any]],
+    vendor_dir: Path,
+    work_dir: Path,
+    replicates: int,
+) -> list[dict[str, Any]]:
+    TradingMemoryLog = load_memory_class(vendor_dir)
+    index = {(r["condition"], r["replicate"], r["precedent_index"]): r for r in rows}
+    contexts: list[dict[str, Any]] = []
+    base_date = date(2026, 1, 5)
+    for condition in CONDITIONS:
+        raw_return, alpha_return = outcome_for(condition)
+        for replicate in range(replicates):
+            for scope in SCOPES:
+                for dose in DOSES:
+                    cell_dir = work_dir / f"{condition}__r{replicate}__{scope}__k{dose}"
+                    cell_dir.mkdir(parents=True, exist_ok=True)
+                    log_path = cell_dir / "memory.md"
+                    memory = TradingMemoryLog({"memory_log_path": str(log_path), "memory_log_max_entries": None})
+                    used_ids = []
+                    for idx in range(dose):
+                        source = index[(condition, replicate, idx)]
+                        ticker = "TRGX" if scope == "same_ticker" else f"FQ{idx + 1:02d}"
+                        trade_date = (base_date + timedelta(days=7 * idx)).isoformat()
+                        memory.store_decision(ticker, trade_date, source["final_decision"])
+                        memory.update_with_outcome(
+                            ticker=ticker,
+                            trade_date=trade_date,
+                            raw_return=raw_return,
+                            alpha_return=alpha_return,
+                            holding_days=5,
+                            reflection=source["reflection"],
