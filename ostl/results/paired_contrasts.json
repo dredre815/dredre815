@@ -1,0 +1,140 @@
+{
+  "rd_selected_vs_null": {
+    "difference": 0.8666666666666667,
+    "ci_low": 0.6666666666666666,
+    "ci_high": 1.0,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      1,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      0,
+      1
+    ]
+  },
+  "rd_selected_vs_diverse": {
+    "difference": 0.13333333333333333,
+    "ci_low": -0.13333333333333333,
+    "ci_high": 0.4,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      1,
+      0,
+      1,
+      0,
+      0
+    ]
+  },
+  "rd_native_vs_raw": {
+    "difference": 0.4666666666666667,
+    "ci_low": 0.2,
+    "ci_high": 0.7333333333333333,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      1,
+      0,
+      1,
+      0,
+      0,
+      1,
+      1,
+      0,
+      0,
+      1,
+      1,
+      0,
+      1,
+      0,
+      0
+    ]
+  },
+  "quanta_cross_selected_vs_null": {
+    "difference": 0.9666666666666667,
+    "ci_low": 0.9,
+    "ci_high": 1.0,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      1,
+      1,
+      0.5,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "quanta_cross_selected_vs_diverse": {
+    "difference": 0.9666666666666667,
+    "ci_low": 0.9,
+    "ci_high": 1.0,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      1,
+      1,
+      0.5,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "quanta_cross_native_vs_raw": {
+    "difference": 0.03333333333333333,
+    "ci_low": -0.06666666666666667,
+    "ci_high": 0.13333333333333333,
+    "paired_replicates": 15,
+    "replicate_differences": [
+      0.5,
+      0,
+      -0.5,
+      0,
+      0,
+      0.5,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}

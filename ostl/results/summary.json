@@ -1,0 +1,56 @@
+{
+  "rdagent_next_hypothesis": {
+    "selected_rate": 0.8666666666666667,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.7333333333333333,
+    "soft_holdout_rate": 0.6,
+    "hard_gate_rate": 0.6,
+    "failure_persistence_rate": 0.9333333333333333,
+    "raw_selected_rate": 0.4,
+    "selected_minus_null": 0.8666666666666667,
+    "selected_minus_diverse": 0.13333333333333341,
+    "native_minus_raw": 0.4666666666666667,
+    "hard_gate_reduction": 0.2666666666666667
+  },
+  "quantaalpha_crossover": {
+    "selected_rate": 0.9666666666666667,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.0,
+    "soft_holdout_rate": 0.9666666666666667,
+    "hard_gate_rate": 0.3,
+    "failure_persistence_rate": 0.9666666666666667,
+    "raw_selected_rate": 0.9333333333333333,
+    "selected_minus_null": 0.9666666666666667,
+    "selected_minus_diverse": 0.9666666666666667,
+    "native_minus_raw": 0.033333333333333326,
+    "hard_gate_reduction": 0.6666666666666667
+  },
+  "quantaalpha_mutation": {
+    "selected_rate": 0.0,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.8,
+    "soft_holdout_rate": 0.0,
+    "hard_gate_rate": 0.0,
+    "failure_persistence_rate": 0.0,
+    "raw_selected_rate": 0.0,
+    "selected_minus_null": 0.0,
+    "selected_minus_diverse": -0.8,
+    "native_minus_raw": 0.0,
+    "hard_gate_reduction": 0.0
+  },
+  "quanta_parent_capture": {
+    "selected_target_parent_share": 0.9,
+    "null_target_parent_share": 0,
+    "hard_gate_target_parent_share": 0.3333333333333333
+  },
+  "winner_curse": {
+    "mean_public_rankic": 0.015587510465044368,
+    "mean_sealed_rankic": 0.008613749149020002,
+    "sota_rankic": 0.012,
+    "present": true
+  },
+  "verdict": "PARTIALLY SUPPORTED",
+  "crossarch_primary": true,
+  "architecture_specificity": false,
+  "hard_gate_effective": false
+}

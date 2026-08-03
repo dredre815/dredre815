@@ -1,0 +1,139 @@
+{
+  "experiment_version": "ostl-crossarch-rd-quanta-v1",
+  "started_unix": 1785746598.4350724,
+  "finished_unix": 1785747165.635698,
+  "duration_s": 567.200626373291,
+  "model_alias_requested": "gpt-5.4-mini",
+  "model_used": "gpt-5.4-mini-2026-03-17",
+  "reasoning_effort": "low",
+  "replicates": 15,
+  "concurrency": 18,
+  "conditions": [
+    "selected_family",
+    "same_family_null",
+    "diverse_success",
+    "selection_disclosed",
+    "holdout_revealed_soft",
+    "sealed_hard_gate",
+    "selected_then_failure"
+  ],
+  "raw_baseline_conditions": [
+    "selected_family",
+    "same_family_null",
+    "diverse_success"
+  ],
+  "rdagent_commit": "4f9ecb005881cddc08df0124a2e894c018007679",
+  "quantaalpha_commit": "b7ceb27b1001261d7a95b209a963664ae1f8ab23",
+  "score_artifact_sha256": "6389dcd6cb8388be603ff42fb379d227e5e76de5023507ba1b9d347e160ba23d",
+  "visible_window": "2021-01-01..2021-12-31",
+  "sealed_window": "2022-01-01..2025-12-26",
+  "sota_rankic": 0.012,
+  "target_pool_size_per_replicate": 18,
+  "dose": 5,
+  "admission_conditioned": true,
+  "source_sha256": {
+    "rd_qlib_prompts": "f8a213cb35c6677a9a4a38ccbdfb4b05fe4798090da83764b8fafe0f1dc98a1c",
+    "rd_proposal_prompts": "a5187101d3b281ea0be9e0d974f3bd65706a9e7235221e108a92f689c4e5e44c",
+    "rd_bandit": "5ae609b00426bb10f80e5ecd2398ffbe3c0d001af94d35871f9354f9d6d95536",
+    "quanta_factor_prompts": "f745d3ced4956998c1648b3341dfb27f917b54dc791af3bf3db2d5a0c6b3fb7b",
+    "quanta_evolution_prompts": "3d5f4b0c1ce982e3cc36b538d63e66de4369d1b0ef85faee72a622d066e292d0",
+    "quanta_crossover": "f2e5eb699bc733dad8665dd6d8dc8783d89d336cc32307292424757c83f4fb19",
+    "quanta_trajectory": "d366febc0814a9ebc5d8a91210653b8af6e7f472bd462c0e2fd0354781b3f279",
+    "quanta_loop": "f95b562a92f53df1750e1d3c3e38f87d49cb4b2a2d63252411ad98f05bcffdd7",
+    "quanta_config": "b21a2394db06b4572393509beff740f224939fc0a18a7337e0bce9f5772cab3a"
+  },
+  "score_csv_sha256": "272037c2de38d567c5be22d39d5df1af5e674b95df5e5288800e401843d8422d",
+  "record_counts": {
+    "artifacts": 600,
+    "feedback": 1125,
+    "outputs": 750,
+    "parent_selection": 150
+  },
+  "annotation_agreement": {
+    "llm_vs_deterministic": 0.772,
+    "cohens_kappa": 0.5239314906790797,
+    "confusion": {
+      "llm0_det0": 370,
+      "llm1_det0": 62,
+      "llm1_det1": 209,
+      "llm0_det1": 109
+    }
+  },
+  "usage": {
+    "input_tokens": 3085634,
+    "output_tokens": 1042996,
+    "total_tokens": 4128630
+  },
+  "estimated_cost_usd": 7.0077075,
+  "pricing_assumption": {
+    "input_per_million_usd": 0.75,
+    "output_per_million_usd": 4.5
+  },
+  "api_error_records": 0,
+  "python": "3.11.15 (main, Jun 16 2026, 21:41:52) [GCC 13.3.0]",
+  "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+  "package_versions": {
+    "openai": "2.52.0",
+    "numpy": "2.4.6",
+    "pandas": "3.0.5",
+    "matplotlib": "3.11.1",
+    "PyYAML": "6.0.3",
+    "Jinja2": "3.1.6"
+  },
+  "primary_metrics": {
+    "rdagent_next_hypothesis": {
+      "selected_rate": 0.8666666666666667,
+      "same_family_null_rate": 0.0,
+      "diverse_success_rate": 0.7333333333333333,
+      "soft_holdout_rate": 0.6,
+      "hard_gate_rate": 0.6,
+      "failure_persistence_rate": 0.9333333333333333,
+      "raw_selected_rate": 0.4,
+      "selected_minus_null": 0.8666666666666667,
+      "selected_minus_diverse": 0.13333333333333341,
+      "native_minus_raw": 0.4666666666666667,
+      "hard_gate_reduction": 0.2666666666666667
+    },
+    "quantaalpha_crossover": {
+      "selected_rate": 0.9666666666666667,
+      "same_family_null_rate": 0.0,
+      "diverse_success_rate": 0.0,
+      "soft_holdout_rate": 0.9666666666666667,
+      "hard_gate_rate": 0.3,
+      "failure_persistence_rate": 0.9666666666666667,
+      "raw_selected_rate": 0.9333333333333333,
+      "selected_minus_null": 0.9666666666666667,
+      "selected_minus_diverse": 0.9666666666666667,
+      "native_minus_raw": 0.033333333333333326,
+      "hard_gate_reduction": 0.6666666666666667
+    },
+    "quantaalpha_mutation": {
+      "selected_rate": 0.0,
+      "same_family_null_rate": 0.0,
+      "diverse_success_rate": 0.8,
+      "soft_holdout_rate": 0.0,
+      "hard_gate_rate": 0.0,
+      "failure_persistence_rate": 0.0,
+      "raw_selected_rate": 0.0,
+      "selected_minus_null": 0.0,
+      "selected_minus_diverse": -0.8,
+      "native_minus_raw": 0.0,
+      "hard_gate_reduction": 0.0
+    },
+    "quanta_parent_capture": {
+      "selected_target_parent_share": 0.9,
+      "null_target_parent_share": 0,
+      "hard_gate_target_parent_share": 0.3333333333333333
+    },
+    "winner_curse": {
+      "mean_public_rankic": 0.015587510465044368,
+      "mean_sealed_rankic": 0.008613749149020002,
+      "sota_rankic": 0.012,
+      "present": true
+    },
+    "verdict": "PARTIALLY SUPPORTED",
+    "crossarch_primary": true,
+    "architecture_specificity": false,
+    "hard_gate_effective": false
+  }
+}

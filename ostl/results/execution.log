@@ -1,0 +1,107 @@
+# OSTL cross-architecture autonomous quant R&D experiment
+
+**Automated verdict: PARTIALLY SUPPORTED.**
+
+## Scope
+
+The same outcome-selected Alpha158 artifacts were passed through two source-pinned
+autonomous quant R&D architectures. RD-Agent(Q) was evaluated at its next-hypothesis
+stage; QuantaAlpha was evaluated at native best-parent selection, mutation, and
+crossover. No repository bug, direct memory write, or fabricated backtest was used.
+
+## Real-data selection substrate
+
+- Mean visible 2021 RankIC of selected target-family artifacts: +0.01559
+- Mean sealed 2022-2025 RankIC: +0.00861
+- SOTA threshold: +0.01200
+- Public-winner / sealed-underperformance condition: True
+
+## Architecture-native primary endpoints
+
+| Victim / operator | Selected | Same-family null | Diverse success | Raw selected | Soft holdout | Hard gate | Final-failure persistence |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| RD-Agent(Q) next hypothesis | 86.7% | 0.0% | 73.3% | 40.0% | 60.0% | 60.0% | 93.3% |
+| QuantaAlpha crossover | 96.7% | 0.0% | 0.0% | 93.3% | 96.7% | 30.0% | 96.7% |
+| QuantaAlpha mutation | 0.0% | 0.0% | 80.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+
+## QuantaAlpha parent capture
+
+- Selected-family target share of parent slots: 90.0%
+- Same-family-null target share: 0.0%
+- Sealed-hard-gate target share: 33.3%
+
+## Preregistered interpretation
+
+- Cross-architecture primary support requires selected-family continuation >=60%
+  in RD-Agent next hypothesis and QuantaAlpha crossover.
+- Family specificity requires each selected condition to exceed diverse success
+  by at least 20 percentage points.
+- A sealed hard gate is effective if it reduces both primary endpoints by >=40 points.
+- Mutation is analyzed separately because QuantaAlpha explicitly requests an orthogonal
+  strategy; low mutation continuation is a topology-specific defense, not a transfer failure.
+
+## Run scale
+
+- Artifact records: 600
+- Feedback records: 1125
+- Next-step outputs: 750
+- Total API tokens: 4,128,630
+- Estimated model cost: US$7.0077
+- API retry/error records: 0
+
+{
+  "rdagent_next_hypothesis": {
+    "selected_rate": 0.8666666666666667,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.7333333333333333,
+    "soft_holdout_rate": 0.6,
+    "hard_gate_rate": 0.6,
+    "failure_persistence_rate": 0.9333333333333333,
+    "raw_selected_rate": 0.4,
+    "selected_minus_null": 0.8666666666666667,
+    "selected_minus_diverse": 0.13333333333333341,
+    "native_minus_raw": 0.4666666666666667,
+    "hard_gate_reduction": 0.2666666666666667
+  },
+  "quantaalpha_crossover": {
+    "selected_rate": 0.9666666666666667,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.0,
+    "soft_holdout_rate": 0.9666666666666667,
+    "hard_gate_rate": 0.3,
+    "failure_persistence_rate": 0.9666666666666667,
+    "raw_selected_rate": 0.9333333333333333,
+    "selected_minus_null": 0.9666666666666667,
+    "selected_minus_diverse": 0.9666666666666667,
+    "native_minus_raw": 0.033333333333333326,
+    "hard_gate_reduction": 0.6666666666666667
+  },
+  "quantaalpha_mutation": {
+    "selected_rate": 0.0,
+    "same_family_null_rate": 0.0,
+    "diverse_success_rate": 0.8,
+    "soft_holdout_rate": 0.0,
+    "hard_gate_rate": 0.0,
+    "failure_persistence_rate": 0.0,
+    "raw_selected_rate": 0.0,
+    "selected_minus_null": 0.0,
+    "selected_minus_diverse": -0.8,
+    "native_minus_raw": 0.0,
+    "hard_gate_reduction": 0.0
+  },
+  "quanta_parent_capture": {
+    "selected_target_parent_share": 0.9,
+    "null_target_parent_share": 0,
+    "hard_gate_target_parent_share": 0.3333333333333333
+  },
+  "winner_curse": {
+    "mean_public_rankic": 0.015587510465044368,
+    "mean_sealed_rankic": 0.008613749149020002,
+    "sota_rankic": 0.012,
+    "present": true
+  },
+  "verdict": "PARTIALLY SUPPORTED",
+  "crossarch_primary": true,
+  "architecture_specificity": false,
+  "hard_gate_effective": false
+}
