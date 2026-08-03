@@ -1,0 +1,219 @@
+name: SPA E1 mechanism pilot
+
+on:
+  push:
+    branches:
+      - spa-pilot-gpt54mini-20260803
+    paths:
+      - 'spa-pilot/**'
+      - '.github/workflows/spa-pilot.yml'
+      - '!spa-pilot/results/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: spa-e1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pilot:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TA_COMMIT: a33fd4c0f134485a43553a2c23a63cb14adbd88f
+      MODEL_SNAPSHOT: gpt-5.4-mini-2026-03-17
+      ISSUE_PREFIX: SPA_CIPHERTEXT_V1
+      AUTHORIZED_LOGIN: dredre815
+      MPLBACKEND: Agg
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          ref: spa-pilot-gpt54mini-20260803
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: spa-pilot/requirements.txt
+
+      - name: Install experiment dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r spa-pilot/requirements.txt
+
+      - name: Assemble and syntax-check experiment source
+        run: |
+          set -euo pipefail
+          cat spa-pilot/src_parts/part-*.pyfrag > spa-pilot/run_spa_pilot.py
+          python -m py_compile spa-pilot/run_spa_pilot.py
+          test "$(wc -l < spa-pilot/run_spa_pilot.py)" -eq 1036
+          echo 'c779f8ec7562a731ea47e24837a0b4555dec80ce0c8896558b1428af70a69c8d  spa-pilot/run_spa_pilot.py' | sha256sum --check
+
+      - name: Fetch pinned TradingAgents source
+        run: |
+          set -euo pipefail
+          rm -rf spa-pilot/vendor/TradingAgents
+          mkdir -p spa-pilot/vendor/TradingAgents
+          git -C spa-pilot/vendor/TradingAgents init -q
+          git -C spa-pilot/vendor/TradingAgents remote add origin https://github.com/TauricResearch/TradingAgents.git
+          git -C spa-pilot/vendor/TradingAgents fetch -q --depth=1 origin "$TA_COMMIT"
+          git -C spa-pilot/vendor/TradingAgents checkout -q --detach FETCH_HEAD
+          test "$(git -C spa-pilot/vendor/TradingAgents rev-parse HEAD)" = "$TA_COMMIT"
+
+      - name: Generate ephemeral RSA key and open handoff issue
+        id: handoff
+        run: |
+          set -euo pipefail
+          umask 077
+          PRIVATE_KEY="$RUNNER_TEMP/spa-private.pem"
+          PUBLIC_KEY="$RUNNER_TEMP/spa-public.pem"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$PRIVATE_KEY" >/dev/null 2>&1
+          openssl pkey -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY" >/dev/null 2>&1
+
+          TITLE="[SPA-KEY-EXCHANGE] run-${GITHUB_RUN_ID}"
+          BODY_FILE="$RUNNER_TEMP/issue-body.md"
+          {
+            echo '# Ephemeral key handoff for SPA E1 pilot'
+            echo
+            echo "Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo "Authorized commenter: \`${AUTHORIZED_LOGIN}\`"
+            echo
+            echo 'Encrypt the one-use OpenAI API key with RSA-OAEP, SHA-256 for OAEP and MGF1, then post one single-line comment:'
+            echo
+            echo "\`${ISSUE_PREFIX}:${GITHUB_RUN_ID}:<base64-ciphertext>\`"
+            echo
+            echo 'The private key exists only on this ephemeral runner and is destroyed after the experiment.'
+            echo
+            echo '```pem'
+            cat "$PUBLIC_KEY"
+            echo '```'
+          } > "$BODY_FILE"
+
+          jq -n --arg title "$TITLE" --rawfile body "$BODY_FILE" '{title:$title, body:$body}' > "$RUNNER_TEMP/issue.json"
+          ISSUE_RESPONSE="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input "$RUNNER_TEMP/issue.json")"
+          ISSUE_NUMBER="$(jq -r '.number' <<<"$ISSUE_RESPONSE")"
+          test "$ISSUE_NUMBER" != null
+          printf '%s\n' "$ISSUE_NUMBER" > "$RUNNER_TEMP/spa-issue-number"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Key handoff issue opened: #$ISSUE_NUMBER"
+
+      - name: Wait for encrypted key and run preregistered pilot
+        run: |
+          set -euo pipefail
+          umask 077
+          ISSUE_NUMBER="$(cat "$RUNNER_TEMP/spa-issue-number")"
+          EXPECTED_PREFIX="${ISSUE_PREFIX}:${GITHUB_RUN_ID}:"
+          CIPHERTEXT=''
+
+          for _ in $(seq 1 240); do
+            CIPHERTEXT="$(
+              gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100" \
+                | jq -r --arg login "$AUTHORIZED_LOGIN" --arg prefix "$EXPECTED_PREFIX" \
+                  '[.[] | select(.user.login == $login and (.body | startswith($prefix))) | .body] | last // empty' \
+                | sed "s#^${EXPECTED_PREFIX}##"
+            )"
+            if [ -n "$CIPHERTEXT" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "$CIPHERTEXT" ]; then
+            echo 'No authorized ciphertext arrived before timeout.' >&2
+            exit 1
+          fi
+
+          printf '%s' "$CIPHERTEXT" | base64 --decode > "$RUNNER_TEMP/spa-cipher.bin"
+          openssl pkeyutl -decrypt \
+            -inkey "$RUNNER_TEMP/spa-private.pem" \
+            -in "$RUNNER_TEMP/spa-cipher.bin" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256 \
+            > "$RUNNER_TEMP/spa-openai.key"
+
+          OPENAI_API_KEY="$(cat "$RUNNER_TEMP/spa-openai.key")"
+          case "$OPENAI_API_KEY" in
+            sk-*) ;;
+            *) echo 'Decrypted payload does not look like an OpenAI API key.' >&2; exit 1 ;;
+          esac
+          echo "::add-mask::$OPENAI_API_KEY"
+
+          rm -rf spa-pilot/results
+          mkdir -p spa-pilot/results
+          OPENAI_API_KEY="$OPENAI_API_KEY" python spa-pilot/run_spa_pilot.py \
+            --vendor spa-pilot/vendor/TradingAgents \
+            --out spa-pilot/results \
+            --model "$MODEL_SNAPSHOT" \
+            --reasoning-effort low \
+            --replicates 5 \
+            --concurrency 6 \
+            2>&1 | tee spa-pilot/results/execution.log
+
+          unset OPENAI_API_KEY CIPHERTEXT
+          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/spa-cipher.bin" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/spa-public.pem" "$RUNNER_TEMP/issue-body.md" "$RUNNER_TEMP/issue.json"
+
+      - name: Validate result bundle
+        run: |
+          set -euo pipefail
+          test -s spa-pilot/results/report.md
+          test -s spa-pilot/results/manifest.json
+          test -s spa-pilot/results/reflections.jsonl
+          test -s spa-pilot/results/portfolio_decisions.jsonl
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('spa-pilot/results/manifest.json').read_text())
+          assert manifest['model_used'] == 'gpt-5.4-mini-2026-03-17'
+          assert manifest['tradingagents_commit'] == 'a33fd4c0f134485a43553a2c23a63cb14adbd88f'
+          assert manifest['admission_conditioned'] is True
+          print(json.dumps({
+              'model': manifest['model_used'],
+              'usage': manifest['usage'],
+              'estimated_cost_usd': manifest['estimated_cost_usd'],
+              'api_error_records': manifest['api_error_records'],
+          }, indent=2))
+          PY
+
+      - name: Commit source and results to experiment branch
+        run: |
+          set -euo pipefail
+          rm -rf spa-pilot/vendor
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add spa-pilot/run_spa_pilot.py spa-pilot/results
+          if git diff --cached --quiet; then
+            echo 'No result changes to commit.'
+          else
+            git commit -m 'Add SPA E1 pilot results [skip ci]'
+            git push origin HEAD:spa-pilot-gpt54mini-20260803
+          fi
+
+      - name: Close key-handoff issue with run status
+        if: always()
+        run: |
+          set +e
+          if [ ! -f "$RUNNER_TEMP/spa-issue-number" ]; then
+            exit 0
+          fi
+          ISSUE_NUMBER="$(cat "$RUNNER_TEMP/spa-issue-number")"
+          if [ "${{ job.status }}" = success ]; then
+            BODY="SPA E1 pilot completed successfully. Results were committed to branch \`spa-pilot-gpt54mini-20260803\` under \`spa-pilot/results/\`. The ephemeral private key and plaintext API-key file were destroyed."
+          else
+            BODY="SPA E1 pilot did not complete successfully. Inspect the Actions job logs. The ephemeral runner is being destroyed; any private/plaintext key material is not persisted."
+          fi
+          jq -n --arg body "$BODY" '{body:$body}' > "$RUNNER_TEMP/status-comment.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" --input "$RUNNER_TEMP/status-comment.json" >/dev/null
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" -f state=closed >/dev/null
+          shred -u "$RUNNER_TEMP/spa-openai.key" "$RUNNER_TEMP/spa-private.pem" "$RUNNER_TEMP/spa-cipher.bin" 2>/dev/null || true
