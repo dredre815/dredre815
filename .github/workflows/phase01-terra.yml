@@ -1,0 +1,97 @@
+name: Phase01 Terra
+
+on:
+  push:
+    branches: [phase01-terra]
+    paths:
+      - '.github/workflows/phase01-terra.yml'
+      - 'phase01/run_phase01.py.gz.b64'
+
+permissions:
+  contents: read
+
+jobs:
+  phase01:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase01-terra
+
+      - name: Generate ephemeral encryption key
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/phase01_private.pem 2>/dev/null
+          openssl pkey -in /tmp/phase01_private.pem -pubout -out /tmp/phase01_public.pem
+          echo '-----PHASE01-PUBLIC-KEY-BEGIN-----'
+          cat /tmp/phase01_public.pem
+          echo '-----PHASE01-PUBLIC-KEY-END-----'
+
+      - name: Prepare upstream and runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/alejandroll10/llm_trading_sim.git upstream
+          cd upstream
+          git checkout --quiet a09d51b48ff7ac02b127e0fdcf0cc530f9ead90d
+          cd ..
+          python -m pip install --upgrade pip >/dev/null
+          pip install -r upstream/requirements.txt >/dev/null
+          base64 -d phase01/run_phase01.py.gz.b64 | gzip -d > phase01/run_phase01.py
+          python -m py_compile phase01/run_phase01.py
+          mkdir -p phase01-results/stage0 phase01-results/stage1
+
+      - name: Run Phase 0 on real upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          python phase01/run_phase01.py --upstream upstream --stage stage0 --out phase01-results/stage0 | tee phase01-results/stage0/stdout.txt
+
+      - name: Wait for encrypted one-time API key
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://raw.githubusercontent.com/dredre815/dredre815/phase01-terra/phase01/key.enc.b64'
+          for i in $(seq 1 180); do
+            if curl -fsSL "${URL}?nonce=$(date +%s)" -o /tmp/key.enc.b64 2>/dev/null; then
+              if [ -s /tmp/key.enc.b64 ]; then echo 'Encrypted key received.'; exit 0; fi
+            fi
+            sleep 5
+          done
+          echo 'Timed out waiting for encrypted key.' >&2
+          exit 1
+
+      - name: Decrypt key and run real Terra Phase 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d /tmp/key.enc.b64 > /tmp/key.enc
+          openssl pkeyutl -decrypt -inkey /tmp/phase01_private.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+            -in /tmp/key.enc -out /tmp/openai_key
+          export OPENAI_API_KEY="$(cat /tmp/openai_key)"
+          python phase01/run_phase01.py --upstream upstream --stage stage1 --out phase01-results/stage1 | tee phase01-results/stage1/stdout.txt
+          unset OPENAI_API_KEY
+          shred -u /tmp/openai_key /tmp/key.enc /tmp/phase01_private.pem || true
+
+      - name: Record provenance
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "upstream_repo=alejandroll10/llm_trading_sim"
+            echo "upstream_commit=a09d51b48ff7ac02b127e0fdcf0cc530f9ead90d"
+            echo "runner_commit=${GITHUB_SHA}"
+            echo "utc_finished=$(date -u +%FT%TZ)"
+          } > phase01-results/provenance.txt
+
+      - name: Upload Phase 0-1 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase01-results
+          path: phase01-results
+          if-no-files-found: warn
+          retention-days: 7
