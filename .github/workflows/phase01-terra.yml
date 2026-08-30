@@ -5,7 +5,7 @@ on:
     branches: [phase01-terra]
     paths:
       - '.github/workflows/phase01-terra.yml'
-      - 'phase01/run_phase01.py.gz.b64'
+      - 'phase01/run_phase01.py'
 
 permissions:
   contents: write
@@ -23,6 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git pull --rebase origin phase01-terra
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/phase01_private.pem 2>/dev/null
           openssl pkey -in /tmp/phase01_private.pem -pubout -out phase01/public_key.pem
           git config user.name 'phase01-runner'
@@ -31,19 +32,18 @@ jobs:
           git commit -m 'Publish ephemeral Phase01 public key [skip ci]'
           git push origin HEAD:phase01-terra
 
-      - name: Prepare upstream and runner
+      - name: Prepare pinned upstream and runner
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p phase01-results/stage0 phase01-results/stage1
           git clone --quiet https://github.com/alejandroll10/llm_trading_sim.git upstream
           cd upstream
           git checkout --quiet a09d51b48ff7ac02b127e0fdcf0cc530f9ead90d
           cd ..
           python -m pip install --upgrade pip >/dev/null
           pip install -r upstream/requirements.txt >/dev/null
-          base64 -d phase01/run_phase01.py.gz.b64 | gzip -d > phase01/run_phase01.py
           python -m py_compile phase01/run_phase01.py
-          mkdir -p phase01-results/stage0 phase01-results/stage1
 
       - name: Run Phase 0 on real upstream
         shell: bash
@@ -82,10 +82,11 @@ jobs:
         if: always()
         shell: bash
         run: |
+          mkdir -p phase01-results
           {
             echo "upstream_repo=alejandroll10/llm_trading_sim"
             echo "upstream_commit=a09d51b48ff7ac02b127e0fdcf0cc530f9ead90d"
-            echo "runner_commit=${GITHUB_SHA}"
+            echo "runner_trigger_commit=${GITHUB_SHA}"
             echo "utc_finished=$(date -u +%FT%TZ)"
           } > phase01-results/provenance.txt
 
