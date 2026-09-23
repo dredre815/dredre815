@@ -1,0 +1,308 @@
+name: DelegationLeak Full Cross-Architecture Evaluation
+
+on:
+  pull_request:
+    types: [synchronize, reopened]
+    paths-ignore:
+      - 'delegationleak/secret/**'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: delegationleak-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  delegationleak:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      MPLBACKEND: Agg
+      PRIOR_ARTIFACT_ID: '8815259198'
+      FORKLEAK_ARTIFACT_ID: '8817506094'
+      RUNTIME_ROOT: ${{ github.workspace }}/delegationleak_materialized
+      RUNTIME_DIR: ${{ github.workspace }}/delegationleak_materialized/runtime
+      RESULTS_DIR: ${{ github.workspace }}/delegationleak_results
+      PRIOR_DIR: ${{ github.workspace }}/delegationleak_prior
+      FORKLEAK_DIR: ${{ github.workspace }}/forkleak_frozen
+      CIPHER_REPO_PATH: delegationleak/secret/${{ github.run_id }}.b64
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+      CREWAI_DISABLE_TELEMETRY: 'true'
+      CREWAI_TRACING_ENABLED: 'false'
+      OTEL_SDK_DISABLED: 'true'
+      DO_NOT_TRACK: '1'
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Materialise and verify experiment harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python delegationleak/bootstrap.py --out "$RUNTIME_ROOT"
+          # Use the documented stable API alias rather than an undocumented dated snapshot.
+          sed -i 's/gpt-5.4-mini-2026-03-17/gpt-5.4-mini/g' "$RUNTIME_DIR/llm_audit.py"
+          python -m py_compile "$RUNTIME_DIR"/*.py
+          sha256sum "$RUNTIME_DIR"/*.py | sort > /tmp/delegationleak-runtime.sha256
+
+      - name: Publish ephemeral RSA handoff key
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
+            -out /tmp/delegationleak-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/delegationleak-private.pem -pubout \
+            -out /tmp/delegationleak-public.pem >/dev/null 2>&1
+          PUBLIC_KEY_B64="$(base64 -w0 /tmp/delegationleak-public.pem)"
+          BODY="$(cat <<EOF
+          DelegationLeak encrypted one-time-key handoff for workflow run ${GITHUB_RUN_ID}. The matching private key exists only in this runner and will be destroyed before job completion.
+
+          DELEGATIONLEAK_KEY_RUN=${GITHUB_RUN_ID}
+          DELEGATIONLEAK_CIPHER_PATH=${CIPHER_REPO_PATH}
+          DELEGATIONLEAK_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}
+          EOF
+          )"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$BODY" >/dev/null
+          echo "Published run-bound RSA public key; private key remains runner-local."
+
+      - name: Set up base Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install numerical, reporting, and API dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install \
+            'numpy==1.26.4' 'pandas==2.2.3' 'scipy==1.13.1' \
+            'pyarrow==19.0.1' 'matplotlib==3.9.4' \
+            'openai>=2.52,<3'
+
+      - name: Download frozen Qlib and ForkLeak evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRIOR_DIR" "$FORKLEAK_DIR" "$RESULTS_DIR"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRIOR_ARTIFACT_ID}/zip" \
+            -o /tmp/delegationleak-prior.zip
+          unzip -t /tmp/delegationleak-prior.zip >/dev/null
+          unzip -q /tmp/delegationleak-prior.zip -d "$PRIOR_DIR"
+          test -f "$PRIOR_DIR/qlib_labels.parquet"
+
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${FORKLEAK_ARTIFACT_ID}/zip" \
+            -o /tmp/delegationleak-forkleak.zip
+          unzip -t /tmp/delegationleak-forkleak.zip >/dev/null
+          unzip -q /tmp/delegationleak-forkleak.zip -d "$FORKLEAK_DIR"
+          test -f "$FORKLEAK_DIR/framework_native_details.json"
+          test -f "$FORKLEAK_DIR/paper_assessment.json"
+          sha256sum /tmp/delegationleak-prior.zip /tmp/delegationleak-forkleak.zip \
+            > "$RESULTS_DIR/input_artifacts.sha256"
+
+      - name: Install framework runtimes and pin application repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv --system-site-packages /tmp/venv-langgraph
+          /tmp/venv-langgraph/bin/python -m pip install --upgrade pip
+          /tmp/venv-langgraph/bin/python -m pip install \
+            'langgraph>=1.0,<2' 'langgraph-checkpoint-sqlite>=2,<4'
+
+          python -m venv --system-site-packages /tmp/venv-autogen
+          /tmp/venv-autogen/bin/python -m pip install --upgrade pip
+          /tmp/venv-autogen/bin/python -m pip install 'autogen-agentchat>=0.7,<0.8'
+
+          python -m venv --system-site-packages /tmp/venv-crewai
+          /tmp/venv-crewai/bin/python -m pip install --upgrade pip
+          /tmp/venv-crewai/bin/python -m pip install 'crewai==1.14.7'
+
+          git clone --filter=blob:none https://github.com/TauricResearch/TradingAgents.git /tmp/TradingAgents
+          git -C /tmp/TradingAgents checkout a33fd4c0f134485a43553a2c23a63cb14adbd88f
+          git clone --filter=blob:none https://github.com/microsoft/RD-Agent.git /tmp/RD-Agent
+          git -C /tmp/RD-Agent checkout 4f9ecb005881cddc08df0124a2e894c018007679
+
+      - name: Run five-architecture DelegationLeak experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR/frameworks" "$RESULTS_DIR/crewai_storage"
+          export CREWAI_STORAGE_DIR="$RESULTS_DIR/crewai_storage"
+          python "$RUNTIME_DIR/prepare_sample.py" \
+            --labels "$PRIOR_DIR/qlib_labels.parquet" \
+            --out "$RESULTS_DIR/sample_case.json" --queries 200
+
+          /tmp/venv-langgraph/bin/python "$RUNTIME_DIR/langgraph_adapter.py" \
+            --sample "$RESULTS_DIR/sample_case.json" \
+            --out "$RESULTS_DIR/frameworks/langgraph.json" \
+            2>&1 | tee "$RESULTS_DIR/langgraph.log"
+          /tmp/venv-autogen/bin/python "$RUNTIME_DIR/autogen_adapter.py" \
+            --sample "$RESULTS_DIR/sample_case.json" \
+            --out "$RESULTS_DIR/frameworks/autogen.json" \
+            2>&1 | tee "$RESULTS_DIR/autogen.log"
+          /tmp/venv-crewai/bin/python "$RUNTIME_DIR/crewai_adapter.py" \
+            --sample "$RESULTS_DIR/sample_case.json" \
+            --out "$RESULTS_DIR/frameworks/crewai.json" \
+            2>&1 | tee "$RESULTS_DIR/crewai.log"
+          /tmp/venv-langgraph/bin/python "$RUNTIME_DIR/tradingagents_adapter.py" \
+            --sample "$RESULTS_DIR/sample_case.json" --repo /tmp/TradingAgents \
+            --out "$RESULTS_DIR/frameworks/tradingagents.json" \
+            2>&1 | tee "$RESULTS_DIR/tradingagents.log"
+          /tmp/venv-langgraph/bin/python "$RUNTIME_DIR/rdagentq_adapter.py" \
+            --sample "$RESULTS_DIR/sample_case.json" --repo /tmp/RD-Agent \
+            --out "$RESULTS_DIR/frameworks/rdagentq.json" \
+            2>&1 | tee "$RESULTS_DIR/rdagentq.log"
+
+      - name: Run full-history real-market reconstruction and robustness sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$RUNTIME_DIR/market_sweep.py" \
+            --labels "$PRIOR_DIR/qlib_labels.parquet" \
+            --framework-dir "$RESULTS_DIR/frameworks" \
+            --out "$RESULTS_DIR" --max-dates 0 --robust-dates 200 \
+            2>&1 | tee "$RESULTS_DIR/market_sweep.log"
+
+      - name: Run defense, nested-delegation, and concurrency experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$RUNTIME_DIR/defense_and_scaling.py" \
+            --assessment "$RESULTS_DIR/paper_assessment.json" \
+            --framework-details "$RESULTS_DIR/framework_native_details.json" \
+            --out "$RESULTS_DIR/defense" \
+            2>&1 | tee "$RESULTS_DIR/defense.log"
+
+      - name: Await encrypted one-time key and run structured LLM audit
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 50
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR/llm"
+          found=0
+          for attempt in $(seq 1 180); do
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/${CIPHER_REPO_PATH}?ref=${HEAD_REF}" \
+              --jq .content > /tmp/delegationleak-content.b64 2>/dev/null; then
+              tr -d '\n' < /tmp/delegationleak-content.b64 | base64 -d \
+                > /tmp/delegationleak-ciphertext.b64
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$found" -ne 1 ]]; then
+            echo 'Encrypted run-bound key payload was not found.' >&2
+            exit 1
+          fi
+          base64 -d /tmp/delegationleak-ciphertext.b64 > /tmp/delegationleak-cipher.bin
+          KEY="$(openssl pkeyutl -decrypt \
+            -inkey /tmp/delegationleak-private.pem \
+            -in /tmp/delegationleak-cipher.bin \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256)"
+          echo "::add-mask::${KEY}"
+          [[ "$KEY" == sk-* ]] || { echo 'Decrypted payload is not an API key.' >&2; exit 1; }
+          OPENAI_API_KEY="$KEY" python "$RUNTIME_DIR/llm_audit.py" \
+            --out "$RESULTS_DIR/llm" --workers 8 \
+            2>&1 | tee "$RESULTS_DIR/llm_audit.log"
+          unset KEY
+          shred -u /tmp/delegationleak-content.b64 \
+            /tmp/delegationleak-ciphertext.b64 /tmp/delegationleak-cipher.bin 2>/dev/null || true
+
+      - name: Extend frozen ForkLeak to five architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$RUNTIME_DIR/forkleak_extension.py" \
+            --forkleak-dir "$FORKLEAK_DIR" --rdagent-repo /tmp/RD-Agent \
+            --sample "$RESULTS_DIR/sample_case.json" \
+            --delegation-assessment "$RESULTS_DIR/paper_assessment.json" \
+            --out "$RESULTS_DIR/variants" \
+            2>&1 | tee "$RESULTS_DIR/forkleak_extension.log"
+
+      - name: Build reports and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR/final"
+          python "$RUNTIME_DIR/build_report.py" \
+            --results "$RESULTS_DIR" --out "$RESULTS_DIR/final" \
+            2>&1 | tee "$RESULTS_DIR/build_report.log"
+          python - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+
+          root = Path(os.environ['RESULTS_DIR'])
+          def cmd(s):
+              try:
+                  return subprocess.check_output(s, shell=True, text=True, stderr=subprocess.STDOUT).strip()
+              except Exception as exc:
+                  return f'unavailable:{type(exc).__name__}'
+          provenance = {
+              'github_run_id': os.environ.get('GITHUB_RUN_ID'),
+              'github_sha': os.environ.get('GITHUB_SHA'),
+              'head_ref': os.environ.get('HEAD_REF'),
+              'runner_os': os.environ.get('RUNNER_OS'),
+              'platform': platform.platform(),
+              'python': platform.python_version(),
+              'base_pip_freeze_sha256': cmd('python -m pip freeze | sha256sum'),
+              'langgraph_freeze_sha256': cmd('/tmp/venv-langgraph/bin/python -m pip freeze | sha256sum'),
+              'autogen_freeze_sha256': cmd('/tmp/venv-autogen/bin/python -m pip freeze | sha256sum'),
+              'crewai_freeze_sha256': cmd('/tmp/venv-crewai/bin/python -m pip freeze | sha256sum'),
+              'tradingagents_head': cmd('git -C /tmp/TradingAgents rev-parse HEAD'),
+              'rdagent_head': cmd('git -C /tmp/RD-Agent rev-parse HEAD'),
+              'runtime_files_sha256': Path('/tmp/delegationleak-runtime.sha256').read_text(),
+              'prior_artifact_id': os.environ.get('PRIOR_ARTIFACT_ID'),
+              'forkleak_artifact_id': os.environ.get('FORKLEAK_ARTIFACT_ID'),
+          }
+          (root / 'workflow_provenance.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
+          PY
+          find "$RESULTS_DIR" -maxdepth 4 -type f -printf '%P\n' | sort
+
+      - name: Destroy runner-local key material
+        if: always()
+        shell: bash
+        run: |
+          shred -u /tmp/delegationleak-private.pem /tmp/delegationleak-public.pem \
+            /tmp/delegationleak-content.b64 /tmp/delegationleak-ciphertext.b64 \
+            /tmp/delegationleak-cipher.bin 2>/dev/null || true
+
+      - name: Upload complete DelegationLeak evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delegationleak-full-${{ github.run_id }}
+          path: delegationleak_results/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
