@@ -1,0 +1,154 @@
+name: AlphaLeak Defense Frontier Extension
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/alphaleak-defense-extension.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  frontier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PRIOR_ARTIFACT_ID: "8815259198"
+      PRIOR_DIR: "${{ github.workspace }}/prior_results"
+      RESULTS_DIR: "${{ github.workspace }}/defense_extension"
+
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies and materialize sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install \
+            "numpy==1.26.4" "pandas==2.0.3" "scipy==1.11.4" \
+            "pyarrow==19.0.1" "matplotlib>=3.8,<4"
+          python3 followup/bootstrap_followup.py --out followup_runtime
+          python -m py_compile followup_runtime/feedback_defense_sweep.py
+
+      - name: Download frozen real-market evidence
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRIOR_DIR" "$RESULTS_DIR"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRIOR_ARTIFACT_ID}/zip" \
+            -o /tmp/alphaleak-prior.zip
+          unzip -q /tmp/alphaleak-prior.zip -d "$PRIOR_DIR"
+          test -f "$PRIOR_DIR/qlib_labels.parquet"
+
+      - name: Fine global query-budget sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          python followup_runtime/feedback_defense_sweep.py \
+            --labels "$PRIOR_DIR/qlib_labels.parquet" \
+            --out "$RESULTS_DIR/budget" \
+            --days 300 \
+            --budgets "1,2,5,10,15,20,25,30,40,50,75,100" \
+            --decimals "6" --sigmas "0" --noise-reps 1 --repeat-counts "1" \
+            2>&1 | tee "$RESULTS_DIR/budget_sweep.log"
+
+      - name: Extended quantization and noise frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python followup_runtime/feedback_defense_sweep.py \
+            --labels "$PRIOR_DIR/qlib_labels.parquet" \
+            --out "$RESULTS_DIR/noise" \
+            --days 120 \
+            --budgets "30,100" \
+            --decimals "6,3,2,1,0" \
+            --sigmas "0,0.02,0.04,0.06,0.08,0.10,0.15,0.20" \
+            --noise-reps 6 --repeat-counts "1,3,10,30" \
+            2>&1 | tee "$RESULTS_DIR/noise_sweep.log"
+
+      - name: Build defense frontier report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path("defense_extension")
+          budget = pd.read_csv(root / "budget" / "feedback_defense_summary.csv")
+          noise = pd.read_csv(root / "noise" / "feedback_defense_summary.csv")
+
+          b = budget[(budget.phase == "grid") & (budget.sigma == 0) & (budget.decimals == 6)].sort_values("budget")
+          privacy = b[b.cosine_mean < 0.30]
+          violating = b[b.cosine_mean >= 0.30]
+          max_safe = int(privacy.budget.max()) if not privacy.empty else None
+          min_violating = int(violating.budget.min()) if not violating.empty else None
+
+          q100 = noise[(noise.phase == "grid") & (noise.budget == 100) & (noise.repeat_count == 1)]
+          q100 = q100.copy()
+          q100["privacy_ok"] = q100.cosine_mean < 0.30
+          q100["utility_ok"] = (q100.score_sign_agreement_mean >= 0.90) & (q100.score_pearson_mean >= 0.95)
+          q100["joint_ok"] = q100.privacy_ok & q100.utility_ok
+
+          avg = noise[(noise.phase == "averaging") & (noise.budget == 100) & (noise.decimals == 6)].copy()
+          selected_avg = avg[avg.sigma.isin([0.06, 0.10, 0.20])]
+
+          result = {
+              "budget_privacy_target": "mean cosine < 0.30",
+              "max_observed_budget_meeting_target": max_safe,
+              "min_observed_budget_violating_target": min_violating,
+              "budget_rows": b[["budget", "cosine_mean", "cosine_ci95_low", "cosine_ci95_high", "top_k_recall_mean", "sign_accuracy_mean"]].to_dict("records"),
+              "q100_joint_frontier_count": int(q100.joint_ok.sum()),
+              "q100_privacy_only_count": int(q100.privacy_ok.sum()),
+              "q100_utility_only_count": int(q100.utility_ok.sum()),
+              "q100_rows": q100[["decimals", "sigma", "noise_mode", "cosine_mean", "top_k_recall_mean", "score_sign_agreement_mean", "score_pearson_mean", "privacy_ok", "utility_ok", "joint_ok"]].to_dict("records"),
+              "averaging_rows": selected_avg[["sigma", "noise_mode", "repeat_count", "cosine_mean", "score_sign_agreement_mean", "score_pearson_mean"]].sort_values(["sigma", "noise_mode", "repeat_count"]).to_dict("records"),
+          }
+          (root / "defense_frontier_summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+          lines = [
+              "# AlphaLeak Defense Frontier Extension",
+              "",
+              f"- Maximum tested global query budget satisfying mean cosine < 0.30: **{max_safe}**",
+              f"- Minimum tested global query budget violating that target: **{min_violating}**",
+              f"- q=100 quantization/noise policies satisfying both privacy and utility targets: **{int(q100.joint_ok.sum())}**",
+              "",
+              "## Fine budget sweep",
+              "",
+              "| q | Mean cosine | 95% CI | Top-50 recall | Sign accuracy |",
+              "|---:|---:|---:|---:|---:|",
+          ]
+          for _, r in b.iterrows():
+              lines.append(f"| {int(r.budget)} | {r.cosine_mean:.4f} | [{r.cosine_ci95_low:.4f}, {r.cosine_ci95_high:.4f}] | {r.top_k_recall_mean:.4f} | {r.sign_accuracy_mean:.4f} |")
+          lines += ["", "## Interpretation", "", "A project-level global accountant is the only tested defense that preserves exact per-query score fidelity while limiting cumulative reconstruction. Coarse rounding and additive noise require utility-destructive settings before q=100 reconstruction approaches the configured privacy target."]
+          (root / "DEFENSE_FRONTIER_REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(json.dumps({"max_safe": max_safe, "min_violating": min_violating, "joint_q100": int(q100.joint_ok.sum())}, indent=2))
+          PY
+
+      - name: Upload extension evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphaleak-defense-extension-${{ github.run_id }}
+          path: defense_extension/
+          if-no-files-found: error
+          retention-days: 14
