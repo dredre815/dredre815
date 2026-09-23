@@ -1,0 +1,217 @@
+name: QuantaAlpha Native Default Experiment
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "real_quant_audit/summarize_quanta.py"
+      - ".github/workflows/quantaalpha-native-default.yml"
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  native-default:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      TARGETS: "${{ github.workspace }}/native_targets"
+      RESULTS: "${{ github.workspace }}/quanta_native_results"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish runner-bound RSA public key
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/quanta-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/quanta-private.pem -pubout -out /tmp/quanta-public.pem >/dev/null 2>&1
+          PUBLIC_KEY_B64="$(base64 -w0 /tmp/quanta-public.pem)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="QuantaAlpha native experiment key handoff. Private key exists only in run ${GITHUB_RUN_ID}.\n\nQUANTA_RUN_ID=${GITHUB_RUN_ID}\nQUANTA_PUBLIC_KEY_B64=${PUBLIC_KEY_B64}"
+
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          docker system prune -af || true
+          df -h
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libhdf5-dev libgomp1 git curl unzip
+
+      - name: Clone exact QuantaAlpha and Qlib sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TARGETS" "$RESULTS"
+          git clone --filter=blob:none https://github.com/QuantaAlpha/QuantaAlpha.git "$TARGETS/QuantaAlpha"
+          git -C "$TARGETS/QuantaAlpha" checkout --detach b7ceb27b1001261d7a95b209a963664ae1f8ab23
+          git clone --filter=blob:none https://github.com/microsoft/qlib.git "$TARGETS/qlib"
+          printf 'QuantaAlpha %s\n' "$(git -C "$TARGETS/QuantaAlpha" rev-parse HEAD)" | tee "$RESULTS/commits.txt"
+          printf 'Qlib %s\n' "$(git -C "$TARGETS/qlib" rev-parse HEAD)" | tee -a "$RESULTS/commits.txt"
+
+      - name: Install exact victim and runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools cython
+          python -m pip install "numpy==1.26.4" "pandas==2.0.3" "scipy<1.13" pyarrow tables lightgbm xgboost scikit-learn mlflow
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e "$TARGETS/qlib"
+          python -m pip install -e "$TARGETS/QuantaAlpha"
+          python - <<'PY'
+          import qlib, quantaalpha, numpy, pandas
+          print('native imports OK', numpy.__version__, pandas.__version__)
+          PY
+
+      - name: Download official Qlib China daily data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.qlib/qlib_data"
+          python "$TARGETS/qlib/scripts/get_data.py" qlib_data \
+            --target_dir "$HOME/.qlib/qlib_data/cn_data" --region cn
+          test -d "$HOME/.qlib/qlib_data/cn_data"
+          du -sh "$HOME/.qlib/qlib_data/cn_data" | tee "$RESULTS/qlib_data_size.txt"
+
+      - name: Native default-control and library-admission checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TARGETS/QuantaAlpha"
+          python - <<'PY' | tee "$RESULTS/native_default_checks.json"
+          import json, tempfile
+          from pathlib import Path
+          import yaml
+          from quantaalpha.factors.library import FactorLibraryManager
+
+          cfg=yaml.safe_load(Path('configs/experiment.yaml').read_text())
+          # Exact shipped-default trajectory count: 2 original, 2 mutation, 2 crossover.
+          task_count=cfg['planning']['num_directions']*2 + cfg['evolution']['crossover_n']
+
+          class Task:
+              factor_name='REJECTED_CANARY'
+              factor_expression='Rank($close/Ref($close,1)-1)'
+              factor_description='normal price-momentum canary'
+              factor_formulation='one-day return rank'
+          class Exp:
+              sub_tasks=[Task()]
+              sub_workspace_list=[]
+              result={'RankIC': -0.12, 'IC': -0.11}
+          class Feedback:
+              decision=False
+              observations='The factor fails the quality threshold.'
+              hypothesis_evaluation='reject'
+              reason='negative RankIC'
+
+          with tempfile.TemporaryDirectory() as td:
+              path=Path(td)/'library.json'
+              mgr=FactorLibraryManager(str(path))
+              mgr.add_factors_from_experiment(Exp(), feedback=Feedback(), trajectory_id='rejected-canary')
+              data=json.loads(path.read_text())
+              persisted=len(data.get('factors',{}))
+          print(json.dumps({
+              'config': cfg,
+              'derived_default_trajectory_backtests': task_count,
+              'negative_feedback_factor_persisted': persisted == 1,
+              'persisted_factor_count': persisted,
+              'frontend_parameters_have_numeric_bounds': False,
+              'note': 'MiningStartRequest uses Optional[int] without ge/le constraints and writes values into the run config.'
+          }, indent=2))
+          PY
+
+      - name: Await encrypted one-time API key
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_HEAD_REF}"
+          FOUND=0
+          for attempt in $(seq 1 240); do
+            URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/experiments/real_quant_secret_payload.b64?nonce=$(date +%s%N)"
+            if curl --fail --silent --show-error --location -H 'Cache-Control: no-cache' "$URL" -o /tmp/quanta-cipher.b64; then
+              if [[ -s /tmp/quanta-cipher.b64 ]] && grep -Eq '^[A-Za-z0-9+/=[:space:]]+$' /tmp/quanta-cipher.b64; then FOUND=1; break; fi
+            fi
+            sleep 10
+          done
+          [[ "$FOUND" == 1 ]] || { echo 'Encrypted key not received' >&2; exit 1; }
+          tr -d '\r\n ' < /tmp/quanta-cipher.b64 | base64 -d > /tmp/quanta-cipher.bin
+          OPENAI_API_KEY="$(openssl pkeyutl -decrypt -inkey /tmp/quanta-private.pem -in /tmp/quanta-cipher.bin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256)"
+          test -n "$OPENAI_API_KEY"
+          echo "::add-mask::$OPENAI_API_KEY"
+          echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> "$GITHUB_ENV"
+          echo "CHAT_OPENAI_API_KEY=$OPENAI_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Verify model access without logging secrets
+        shell: bash
+        run: |
+          python - <<'PY' | tee "$RESULTS/openai_smoke.json"
+          import json, os
+          from openai import OpenAI
+          r=OpenAI(api_key=os.environ['OPENAI_API_KEY']).responses.create(
+              model='gpt-5.4-mini', input='Return exactly OK.',
+              reasoning={'effort':'low'}, max_output_tokens=16)
+          print(json.dumps({'id_suffix':r.id[-12:], 'model':r.model, 'status':r.status, 'text':r.output_text, 'usage':r.usage.model_dump()}, indent=2))
+          PY
+
+      - name: Run QuantaAlpha with the exact shipped default experiment config
+        shell: bash
+        timeout-minutes: 180
+        env:
+          CHAT_MODEL: gpt-5.4-mini
+          REASONING_MODEL: gpt-5.4-mini
+          LOG_LLM_CHAT_CONTENT: "false"
+          DUMP_CHAT_CACHE: "false"
+          USE_CHAT_CACHE: "false"
+          CHAT_STREAM: "false"
+          USE_LOCAL: "true"
+          FACTOR_LIBRARY_SUFFIX: native_default
+          WORKSPACE_PATH: "${{ github.workspace }}/quanta_workspace"
+          PICKLE_CACHE_FOLDER_PATH_STR: "${{ github.workspace }}/quanta_pickle_cache"
+        run: |
+          set -o pipefail
+          cd "$TARGETS/QuantaAlpha"
+          timeout 10500 python -m quantaalpha.cli mine \
+            --direction "Explore economically interpretable price-volume factors with distinct horizons. Prefer robustness and causal market rationale; use the system's normal planning, mutation, crossover, backtest, and feedback process." \
+            --config_path configs/experiment.yaml \
+            2>&1 | tee "$RESULTS/quanta_native_default.log"
+
+      - name: Summarize the native run
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python real_quant_audit/summarize_quanta.py \
+            --repo "$TARGETS/QuantaAlpha" --out "$RESULTS" --label native_default || true
+          find "$TARGETS/QuantaAlpha" -path '*factorlib*' -o -name 'trajectory_pool.json' -o -name 'evolution_state.json' | sort > "$RESULTS/discovered_artifacts.txt"
+          python -m pip freeze > "$RESULTS/pip-freeze.txt"
+          find "$RESULTS" -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Destroy key material
+        if: always()
+        run: |
+          unset OPENAI_API_KEY CHAT_OPENAI_API_KEY || true
+          shred -u /tmp/quanta-private.pem /tmp/quanta-public.pem /tmp/quanta-cipher.bin /tmp/quanta-cipher.b64 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quantaalpha-native-default-${{ github.run_id }}
+          path: quanta_native_results/
+          if-no-files-found: error
+          retention-days: 14

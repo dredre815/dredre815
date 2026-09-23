@@ -1,0 +1,63 @@
+name: Real Quant Victim Exact-Default Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "real_quant_audit/**"
+      - ".github/workflows/real-quant-victim-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install audit dependency
+        run: python -m pip install "pyyaml>=6,<7"
+
+      - name: Clone and pin real quant-agent victims
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p targets
+
+          git clone --filter=blob:none https://github.com/microsoft/RD-Agent.git targets/RD-Agent
+          git -C targets/RD-Agent checkout --detach 4f9ecb005881cddc08df0124a2e894c018007679
+
+          git clone --filter=blob:none https://github.com/RndmVariableQ/AlphaAgent.git targets/AlphaAgent-main
+          git -C targets/AlphaAgent-main checkout --detach b42cb397025510da44355db9dcf278304321f589
+
+          git clone --filter=blob:none --branch legacy-main https://github.com/RndmVariableQ/AlphaAgent.git targets/AlphaAgent-legacy
+
+          git clone --filter=blob:none https://github.com/QuantaAlpha/QuantaAlpha.git targets/QuantaAlpha
+          git -C targets/QuantaAlpha checkout --detach b7ceb27b1001261d7a95b209a963664ae1f8ab23
+
+          for d in targets/*; do printf '%s %s\n' "$(basename "$d")" "$(git -C "$d" rev-parse HEAD)"; done | tee target_commits.txt
+
+      - name: Run exact-default audit
+        run: python real_quant_audit/audit.py
+
+      - name: Add provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target_commits.txt real_quant_results/
+          python -m pip freeze > real_quant_results/pip-freeze.txt
+          sha256sum real_quant_results/* > real_quant_results/SHA256SUMS.txt
+          cat real_quant_results/EXACT_DEFAULT_AUDIT.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-quant-exact-default-audit-${{ github.run_id }}
+          path: real_quant_results/
+          if-no-files-found: error
+          retention-days: 14

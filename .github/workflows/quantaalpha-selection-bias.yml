@@ -1,0 +1,54 @@
+name: QuantaAlpha Real-Factor Selection Bias
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "real_quant_audit/quanta_factor_selection.py"
+      - ".github/workflows/quantaalpha-selection-bias.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  selection-bias:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      PYTHONUNBUFFERED: "1"
+      RESULTS: "${{ github.workspace }}/quanta_selection_results"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Free disk and install system dependencies
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libhdf5-dev libgomp1 git
+      - name: Install frozen Qlib runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/microsoft/qlib.git qlib-target
+          python -m pip install --upgrade pip wheel setuptools cython
+          python -m pip install "numpy==1.26.4" "pandas==2.0.3" "scipy<1.13" pyarrow tables scikit-learn
+          python -m pip install -e qlib-target
+          mkdir -p "$HOME/.qlib/qlib_data" "$RESULTS"
+          python qlib-target/scripts/get_data.py qlib_data \
+            --target_dir "$HOME/.qlib/qlib_data/cn_data" --region cn
+          git -C qlib-target rev-parse HEAD | tee "$RESULTS/qlib_commit.txt"
+      - name: Run native Alpha158 visible-versus-sealed selection experiment
+        run: |
+          python real_quant_audit/quanta_factor_selection.py \
+            --provider "$HOME/.qlib/qlib_data/cn_data" \
+            --out "$RESULTS" --trials 1000 \
+            2>&1 | tee "$RESULTS/selection.log"
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantaalpha-selection-bias-${{ github.run_id }}
+          path: quanta_selection_results/
+          if-no-files-found: error
+          retention-days: 14

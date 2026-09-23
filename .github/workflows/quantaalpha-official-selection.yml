@@ -1,0 +1,57 @@
+name: QuantaAlpha Official-Data Selection Control
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "real_quant_audit/quanta_official_selection.py"
+      - ".github/workflows/quantaalpha-official-selection.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  official-selection:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      PYTHONUNBUFFERED: "1"
+      RESULTS: "${{ github.workspace }}/quanta_official_selection_results"
+      HF_DATA: "${{ github.workspace }}/quanta_official_selection_hf"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install frozen Qlib runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libhdf5-dev libgomp1 git unzip
+          git clone --filter=blob:none https://github.com/microsoft/qlib.git qlib-target
+          python -m pip install --upgrade pip wheel setuptools cython
+          python -m pip install "numpy==1.26.4" "pandas==2.0.3" "scipy<1.13" pyarrow tables scikit-learn huggingface_hub
+          python -m pip install -e qlib-target
+          mkdir -p "$RESULTS" "$HF_DATA" official_qlib
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          path=hf_hub_download(repo_id='QuantaAlpha/qlib_csi300',filename='cn_data.zip',repo_type='dataset',local_dir=os.environ['HF_DATA'])
+          print(path)
+          PY
+          unzip -q "$HF_DATA/cn_data.zip" -d official_qlib
+          git -C qlib-target rev-parse HEAD | tee "$RESULTS/qlib_commit.txt"
+      - name: Run 2021-visible versus 2022-2025 sealed Alpha158 control
+        run: |
+          python real_quant_audit/quanta_official_selection.py \
+            --provider "$GITHUB_WORKSPACE/official_qlib/cn_data" \
+            --out "$RESULTS" --trials 1000 \
+            2>&1 | tee "$RESULTS/official_selection.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quantaalpha-official-selection-${{ github.run_id }}
+          path: quanta_official_selection_results/
+          if-no-files-found: error
+          retention-days: 14
